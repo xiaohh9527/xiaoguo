@@ -1,11 +1,12 @@
 # ==========================================
 # 阶段 1: 构建前端 Vue 静态页面
+# 前端产物为静态资源，使用原生构建机架构运行即可，避免 QEMU 模拟导致速度极其缓慢
 # ==========================================
-FROM node:20-alpine AS frontend-builder
+FROM --platform=$BUILDPLATFORM node:20-alpine AS frontend-builder
 WORKDIR /app/web
 
-# 配置 npm 加速镜像源 (构建时支持国内镜像源)
-ARG NPM_REGISTRY=https://registry.npmmirror.com
+# 优先使用官方源 (GitHub Actions 运行在海外千兆网络，直连最快)
+ARG NPM_REGISTRY=https://registry.npmjs.org/
 RUN npm config set registry ${NPM_REGISTRY}
 
 # 复制依赖定义并安装
@@ -17,25 +18,27 @@ COPY web/ ./
 RUN npm run build
 
 # ==========================================
-# 阶段 2: 构建后端 Go 可执行二进制
+# 阶段 2: 构建后端 Go 二进制
+# 利用 Go 语言原生的毫秒级交叉编译能力 (GOARCH)，免去 QEMU 模拟器开销
 # ==========================================
-FROM golang:1.23-alpine AS backend-builder
+FROM --platform=$BUILDPLATFORM golang:1.23-alpine AS backend-builder
 WORKDIR /app/server
 
-# 配置 GOPROXY 代理加速
-ARG GOPROXY=https://goproxy.cn,direct
+ARG TARGETOS
+ARG TARGETARCH
+ARG GOPROXY=https://proxy.golang.org,direct
 ENV GOPROXY=${GOPROXY}
 
 # 复制 go.mod 和 go.sum 预下载依赖
 COPY server/go.mod server/go.sum* ./
 RUN go mod download
 
-# 复制后端源码并静态编译 (CGO_ENABLED=0，跨 Linux 发行版通用)
+# 复制后端源码并跨架构静态编译 (CGO_ENABLED=0，纯静态二进制)
 COPY server/ ./
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o xiaoguo-server .
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build -ldflags="-s -w" -o xiaoguo-server .
 
 # ==========================================
-# 阶段 3: 最终精简运行镜像 (基于 Alpine，体积 < 30MB)
+# 阶段 3: 最终精简运行镜像 (对应目标架构 Alpine，体积 < 30MB)
 # ==========================================
 FROM alpine:3.20
 
