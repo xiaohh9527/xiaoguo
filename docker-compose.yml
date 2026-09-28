@@ -1,0 +1,16 @@
+services:
+  xiaoguo:
+    image: xiaoguo:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: xiaoguo
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      # 持久化存储用户追剧、历史记录以及视频流缓存
+      - ./data:/app/data
+    environment:
+      - TZ=Asia/Shanghai
+      - PORT=8080

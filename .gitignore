@@ -1,0 +1,48 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build outputs
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+dist/
+build/
+bin/
+
+# Cache & Temporary files
+.gocache/
+.cache/
+*.tmp
+*.log
+.DS_Store
+Thumbs.db
+__pycache__/
+*.pyc
+
+# Local runtime data & cache
+server/data/cache/
+server/data/*.json
+data/cache/
+data/*.json
+
+# IDE & Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Flutter / guoapp build artifacts if any
+.dart_tool/
+.flutter-plugins*
+.pub-cache/
+android/.gradle/
+android/local.properties
+ios/Pods/
+ios/.symlinks/
+
+# Reference project
+guoapp/
+
