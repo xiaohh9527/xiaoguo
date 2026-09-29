@@ -112,3 +112,4 @@
 3. **自动化同步流**：
    - 代码修改与本地验证通过后，自动同步更新 `小果短剧.py` 并推送到 GitHub 远端仓库的 `main` 分支；
    - GitHub Actions 监听 `main` 分支变动，全自动打包并推送多架构镜像至 GitHub Container Registry（`ghcr.io`）。
+
