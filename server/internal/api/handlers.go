@@ -158,8 +158,17 @@ func (s *Server) HandleStream(w http.ResponseWriter, r *http.Request) {
 	if videoID == "" {
 		videoID = q.Get("vid")
 	}
+	if videoID == "" {
+		videoID = q.Get("id")
+	}
 	if strings.Contains(videoID, "*") {
 		parts := strings.SplitN(videoID, "*", 2)
+		if seriesID == "" {
+			seriesID = parts[0]
+		}
+		videoID = parts[1]
+	} else if strings.Contains(videoID, "|") {
+		parts := strings.SplitN(videoID, "|", 2)
 		if seriesID == "" {
 			seriesID = parts[0]
 		}
@@ -335,5 +344,6 @@ func (s *Server) HandleClearHistory(w http.ResponseWriter, r *http.Request) {
 	_ = s.storage.ClearHistory()
 	jsonOK(w, true)
 }
+
 
 
