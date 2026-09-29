@@ -1,17 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-小果短剧 (Xiaoguo) AList-TvBox 插件 Python 源
-适配规范：AList-TvBox / TVBox Python Spider 插件规范
-支持特性：
-  - 完整桥接模式：配合小主机 xiaoguo 后端 (默认 http://127.0.0.1:8080) 输出 1080P 超清解密流
-  - 扩展配置 (extend)：支持在 AList-TvBox 插件设置中自定义 backend 地址
-  - 免后端自动回退：桥接后端未启动时，自动降级至官方网页通道
-  - 全集解锁、实时搜索、排行榜单、精细选集
-
-AList-TvBox 插件配置参数 (ext)：
-  "http://192.168.1.100:8080"
-  或 JSON 格式：
-  {"site": "http://192.168.1.100:8080"}
+//@name:小果短剧[短]
+//@id:xiaoguo_short_drama
+//@version:102
+//@author:xiaoguo
+//@description:小果短剧全集解锁 AList-TvBox 插件，纯后端接口驱动，输出 1080P 超清解密流。
+//@config-schema:{"description":"小果短剧业务配置。配置小果后端服务地址后，电视端即可享受全集 1080P 解密播放、实时搜索、榜单与分类。来源：插件脚本声明","fields":[{"key":"server_url","label":"小果后端服务地址","type":"string","required":true,"defaultValue":"http://127.0.0.1:8080","placeholder":"http://192.168.1.100:8080 或 http://xiaoguo:8080","description":"小主机上部署的 xiaoguo 容器或后端服务访问地址（不要带末尾斜杠）。"},{"key":"quality","label":"默认播放清晰度","type":"string","required":false,"defaultValue":"1080","placeholder":"1080","description":"优先选择的清晰度（如 1080、720、540、480）。"},{"key":"proxy_cover","label":"海报走后端代理","type":"boolean","required":false,"defaultValue":true,"description":"开启后海报由小果后端代理缓存并转换为标准 JPEG，避免第三方防盗链及图片无法显示。"}]}
 """
 import json
 import os
@@ -36,16 +30,53 @@ except Exception:
         pass
 
 
+# AList-TvBox 后台扩展配置表单声明 (供 AList-TVBox 自动渲染表单编辑界面)
+PLUGIN_CONFIG_SCHEMA = {
+    "source": "declared",
+    "description": "小果短剧业务配置。配置小果后端服务地址后，电视端即可享受全集 1080P 解密播放、实时搜索、榜单与分类。来源：插件脚本声明",
+    "allowAdditional": True,
+    "fields": [
+        {
+            "key": "server_url",
+            "label": "小果后端服务地址",
+            "type": "string",
+            "required": True,
+            "defaultValue": "http://127.0.0.1:8080",
+            "placeholder": "http://192.168.1.100:8080 或 http://xiaoguo:8080",
+            "description": "小主机上部署的 xiaoguo 容器或后端服务访问地址（不要带末尾斜杠）。",
+        },
+        {
+            "key": "quality",
+            "label": "默认播放清晰度",
+            "type": "string",
+            "required": False,
+            "defaultValue": "1080",
+            "placeholder": "1080",
+            "description": "优先选择的清晰度（如 1080、720、540、480）。",
+        },
+        {
+            "key": "proxy_cover",
+            "label": "海报走后端代理",
+            "type": "boolean",
+            "required": False,
+            "defaultValue": True,
+            "description": "开启后海报由小果后端代理缓存并转换为标准 JPEG，避免第三方防盗链及图片无法显示。",
+        },
+    ],
+}
+
+
 class Spider(BaseSpider):
     def __init__(self):
-        # 默认桥接后端地址 (可在 AList-TvBox 中通过 extend 参数配置)
-        self.host = "http://127.0.0.1:8080"
-        self.api = self.host + "/api"
+        # 默认后端地址，可通过 AList-TvBox 后台的“扩展配置”直接编辑修改
+        self.server_url = "http://127.0.0.1:8080"
+        self.api = self.server_url + "/api"
         self.name = "小果短剧"
-        self.web_site = "https://hongguoduanju.com"
+        self.quality = "1080"
+        self.proxy_cover = True
         self.headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Referer": self.host + "/",
+            "Referer": self.server_url + "/",
         }
         if requests is not None:
             self.session = requests.Session()
@@ -53,24 +84,34 @@ class Spider(BaseSpider):
         else:
             self.session = None
         self.class_cache = None
-        self.filter_cache = {}
 
     def init(self, extend=""):
-        """AList-TvBox 插件初始化，解析 extend 配置"""
+        """AList-TvBox 插件初始化，接收后台表单/JSON扩展配置"""
         if extend:
             try:
                 cfg = json.loads(extend) if isinstance(extend, str) else extend
                 if isinstance(cfg, dict):
-                    self.host = (cfg.get("site") or cfg.get("host") or cfg.get("bridge") or cfg.get("base_url") or self.host).rstrip("/")
+                    self.server_url = (
+                        cfg.get("server_url")
+                        or cfg.get("site")
+                        or cfg.get("host")
+                        or cfg.get("bridge")
+                        or cfg.get("base_url")
+                        or self.server_url
+                    ).rstrip("/")
+                    self.quality = str(cfg.get("quality") or self.quality)
+                    if "proxy_cover" in cfg:
+                        self.proxy_cover = bool(cfg.get("proxy_cover"))
                 elif str(extend).strip().startswith("http"):
-                    self.host = str(extend).strip().rstrip("/")
+                    self.server_url = str(extend).strip().rstrip("/")
             except Exception:
                 if str(extend).strip().startswith("http"):
-                    self.host = str(extend).strip().rstrip("/")
-            self.api = self.host + "/api"
-            self.headers["Referer"] = self.host + "/"
-            if self.session is not None:
-                self.session.headers.update(self.headers)
+                    self.server_url = str(extend).strip().rstrip("/")
+
+        self.api = self.server_url + "/api"
+        self.headers["Referer"] = self.server_url + "/"
+        if self.session is not None:
+            self.session.headers.update(self.headers)
 
     def getName(self):
         return self.name
@@ -79,6 +120,7 @@ class Spider(BaseSpider):
         return False
 
     def homeContent(self, filter):
+        """首页推荐内容与分类列表 (纯后端驱动)"""
         classes = self._classes()
         data = self._api("/catalog", {"genre": "short_play", "offset": "0"})
         items = self._list(data)
@@ -91,19 +133,15 @@ class Spider(BaseSpider):
         }
 
     def categoryContent(self, tid, pg, filter, extend):
-        extend = extend or {}
+        """分类与排行榜单翻页 (纯后端驱动)"""
         page = max(1, self._int(pg, 1))
         tid = str(tid or "short_play")
 
-        # 1. 榜单分类
-        if tid.startswith("rank_"):
-            board_map = {
-                "rank_hot": "hongguo-hot",
-                "rank_real": "hongguo-real",
-                "rank_comic": "hongguo-comic",
-                "rank_ai": "hongguo-ai",
-            }
-            board = board_map.get(tid, "hongguo-hot")
+        # 1. 榜单分类 (直接调用后端 /api/rankings)
+        if tid.startswith("rank:") or tid.startswith("hongguo-") or tid.startswith("rank_"):
+            board = tid.replace("rank:", "").replace("rank_", "hongguo-")
+            if board == "rank_hot":
+                board = "hongguo-hot"
             data = self._api("/rankings", {"board": board, "page": str(page)})
             items = data.get("items", []) if isinstance(data, dict) else []
             vod_list = []
@@ -113,7 +151,7 @@ class Spider(BaseSpider):
                 vod_list.append({
                     "vod_id": sid,
                     "vod_name": str(dr.get("title") or dr.get("name") or sid),
-                    "vod_pic": self._pic(dr),
+                    "vod_pic": self._pic(dr.get("cover")),
                     "vod_remarks": str(it.get("metric") or dr.get("heat") or f"Top {it.get('rank', '')}"),
                     "vod_year": f"★{dr.get('score')}" if dr.get("score") else "",
                 })
@@ -128,7 +166,7 @@ class Spider(BaseSpider):
                 "jx": 0,
             }
 
-        # 2. 剧库分类 (真人剧 / 漫剧 / AI剧 / 动漫)
+        # 2. 剧库分类 (直接调用后端 /api/catalog)
         offset = (page - 1) * 18
         data = self._api("/catalog", {"genre": tid, "offset": str(offset)})
         items = self._list(data)
@@ -145,6 +183,7 @@ class Spider(BaseSpider):
         }
 
     def detailContent(self, ids):
+        """剧集详情与全部分集列表 (纯后端驱动)"""
         vid = self._sid(ids[0])
         data = self._api("/detail", {"id": vid})
         if not isinstance(data, dict):
@@ -161,6 +200,7 @@ class Spider(BaseSpider):
                 idx = c.get("index") or i
                 title = c.get("title") or ("第%s集" % idx)
                 chapter_vid = str(c.get("videoId") or "")
+                # 遵循 AList-TvBox 标准管道符分隔格式：第1集$sid|vid
                 play.append("%s$%s|%s" % (title, vid, chapter_vid))
         else:
             play = ["第%s集$%s|%s" % (i, vid, i) for i in range(1, count + 1)]
@@ -168,7 +208,7 @@ class Spider(BaseSpider):
         vod = {
             "vod_id": vid,
             "vod_name": name,
-            "vod_pic": self._pic(drama),
+            "vod_pic": self._pic(drama.get("cover")),
             "type_name": drama.get("categoryName") or ",".join(drama.get("tags") or []),
             "vod_year": f"★{drama.get('score')}" if drama.get("score") else "",
             "vod_area": "中国大陆",
@@ -182,7 +222,9 @@ class Spider(BaseSpider):
         return {"list": [vod], "parse": 0, "jx": 0}
 
     def searchContent(self, key, quick, pg="1"):
-        data = self._api("/search", {"keyword": str(key)})
+        """关键词搜索 (纯后端驱动)"""
+        keyword = str(key).strip()
+        data = self._api("/search", {"keyword": keyword})
         items = data.get("dramas", []) if isinstance(data, dict) else self._list(data)
         vod_list = [self._vod(x) for x in items]
         return {
@@ -196,9 +238,9 @@ class Spider(BaseSpider):
         }
 
     def playerContent(self, flag, id, vipFlags):
-        """播放解析，输出桥接流直链"""
+        """播放地址解析，直接输出后端 1080P 解密流直链"""
         # id 格式为 sid|vid 或 vid
-        url = "%s/play?vid=%s" % (self.host, quote(str(id)))
+        url = "%s/play?vid=%s&quality=%s" % (self.server_url, quote(str(id)), quote(str(self.quality)))
         return {
             "parse": 0,
             "playUrl": "",
@@ -206,7 +248,7 @@ class Spider(BaseSpider):
             "jx": 0,
             "header": {
                 "User-Agent": self.headers["User-Agent"],
-                "Referer": self.host + "/",
+                "Referer": self.server_url + "/",
             },
         }
 
@@ -221,19 +263,17 @@ class Spider(BaseSpider):
 
     def destroy(self):
         self.class_cache = None
-        self.filter_cache.clear()
 
     # ==========================================
-    # 内部请求与数据处理封装
+    # 纯后端 API 通信工具
     # ==========================================
     def _api(self, path, params=None):
-        """优先调用桥接后端接口，失败时自动走网页回退"""
+        """调用小果后端 API，获取标准 JSON 数据"""
         path = "/" + path.lstrip("/")
-        # 1. 尝试桥接后端 (self.api)
+        url = self.api + path
         try:
-            url = self.api + path
             if self.session is not None:
-                r = self.session.get(url, params=params, timeout=6)
+                r = self.session.get(url, params=params, timeout=10)
                 if r.status_code == 200:
                     res = r.json()
                     if res.get("code") == 0:
@@ -241,184 +281,46 @@ class Spider(BaseSpider):
             else:
                 qs = ("?" + urlencode(params)) if params else ""
                 req = urllib.request.Request(url + qs, headers=self.headers)
-                with urllib.request.urlopen(req, timeout=6) as resp:
+                with urllib.request.urlopen(req, timeout=10) as resp:
                     if resp.status == 200:
                         res = json.loads(resp.read().decode("utf-8"))
                         if res.get("code") == 0:
                             return res.get("data", res)
-        except Exception:
-            pass
-
-        # 2. 桥接后端不可用时，网页通道自动回退
-        return self._web_fallback(path, params)
-
-    def _web_fallback(self, path, params=None):
-        """网页官方通道回退抓取"""
-        params = params or {}
-        # 分类回退
-        if path == "/catalog":
-            genre = params.get("genre", "short_play")
-            offset = self._int(params.get("offset", 0))
-            page = (offset // 18) + 1
-            route_map = {
-                "short_play": "real-drama",
-                "comic_series": "comic-drama",
-                "ai_series": "ai-drama",
-                "comic": "comic",
-            }
-            route = route_map.get(genre, "real-drama")
-            html = self._raw_get(f"{self.web_site}/category/{route}?page={page}")
-            data = self._extract_router(html)
-            page_data = data.get("loaderData", {}).get("category_$", {}) or data.get("loaderData", {}).get("category_page", {})
-            rows = page_data.get("recommendList", [])
-            dramas = []
-            for r in rows:
-                dramas.append({
-                    "sourceId": str(r.get("series_id") or ""),
-                    "title": r.get("series_name") or r.get("title") or "",
-                    "cover": r.get("series_cover") or r.get("cover") or "",
-                    "totalEpisodes": r.get("episode_cnt"),
-                    "remark": r.get("episode_right_text"),
-                })
-            return {"data": dramas, "hasMore": len(rows) >= 18}
-
-        # 榜单回退
-        if path == "/rankings":
-            board = params.get("board", "hongguo-hot")
-            page = params.get("page", "1")
-            path_map = {
-                "hongguo-hot": "hot-drama",
-                "hongguo-real": "hot-real-drama",
-                "hongguo-comic": "hot-comic-drama",
-                "hongguo-ai": "hot-ai-drama",
-            }
-            rank_path = path_map.get(board, "hot-drama")
-            html = self._raw_get(f"{self.web_site}/rank/{rank_path}?page={page}")
-            arts = re.findall(r'<article[^>]*aria-labelledby="rank-title-(\d+)"[^>]*>(.*?)</article>', html, re.DOTALL)
-            items = []
-            for rank_idx, (sid, art) in enumerate(arts, 1):
-                tm = re.search(r'id="rank-title-\d+"[^>]*>(.*?)<', art)
-                title = tm.group(1).strip() if tm else sid
-                cm = re.search(r'<img[^>]+src="([^"]+)"', art)
-                cover = cm.group(1) if cm else ""
-                hm = re.search(r'(\d+(?:\.\d+)?[万亿]?热度)', art)
-                heat = hm.group(1) if hm else ""
-                sm = re.search(r'评分\s*(\d+\.\d+)', art)
-                score = sm.group(1) if sm else ""
-                items.append({
-                    "rank": rank_idx,
-                    "metric": heat,
-                    "drama": {
-                        "sourceId": sid,
-                        "title": title,
-                        "cover": cover,
-                        "score": score,
-                        "heat": heat,
-                    },
-                })
-            return {"items": items, "hasMore": len(items) >= 20}
-
-        # 详情回退
-        if path == "/detail":
-            sid = params.get("id", "")
-            html = self._raw_get(f"{self.web_site}/detail?series_id={quote(sid)}")
-            data = self._extract_router(html)
-            s = data.get("loaderData", {}).get("detail_page", {}).get("seriesDetail", {})
-            vids = [str(v) for v in (s.get("vid_list") or []) if str(v)]
-            chapters = []
-            for i, vid in enumerate(vids, 1):
-                chapters.append({"index": i, "title": f"第{i}集", "videoId": vid})
-            drama = {
-                "sourceId": sid,
-                "title": s.get("series_name") or "",
-                "cover": s.get("series_cover") or "",
-                "desc": s.get("series_intro") or "",
-                "totalEpisodes": len(vids),
-                "remark": s.get("episode_right_text") or (f"全{len(vids)}集" if vids else ""),
-                "tags": s.get("tags") or [],
-            }
-            return {"drama": drama, "chapters": chapters}
-
-        # 搜索回退
-        if path == "/search":
-            keyword = params.get("keyword", "")
-            html = self._raw_get(f"{self.web_site}/search/{quote(keyword)}")
-            data = self._extract_router(html)
-            page = data.get("loaderData", {}).get("search_(keyword)/page", {}) or data.get("loaderData", {}).get("search_page", {})
-            dramas = []
-            for it in page.get("searchList", []):
-                vd = it.get("video_data") or it
-                sid = str(vd.get("series_id") or it.get("keyword") or "")
-                if sid:
-                    dramas.append({
-                        "sourceId": sid,
-                        "title": vd.get("series_title") or it.get("name") or "",
-                        "cover": vd.get("series_cover") or "",
-                        "remark": vd.get("episode_right_text") or (f"全{vd.get('episode_cnt')}集" if vd.get("episode_cnt") else ""),
-                    })
-            return {"dramas": dramas}
-
-        return {}
-
-    def _raw_get(self, url):
-        try:
-            h = dict(self.headers)
-            h["Referer"] = self.web_site + "/"
-            if self.session is not None:
-                r = self.session.get(url, headers=h, timeout=12)
-                r.encoding = "utf-8"
-                return r.text
-            req = urllib.request.Request(url, headers=h)
-            with urllib.request.urlopen(req, timeout=12) as resp:
-                return resp.read().decode("utf-8", errors="replace")
-        except Exception:
-            return ""
-
-    def _extract_router(self, html):
-        for marker in ("_ROUTER_DATA = ", "window._ROUTER_DATA = "):
-            pos = html.find(marker)
-            if pos != -1:
-                pos += len(marker)
-                while pos < len(html) and html[pos] in " \t\r\n":
-                    pos += 1
-                depth = 0
-                in_s = False
-                esc = False
-                for i in range(pos, len(html)):
-                    c = html[i]
-                    if esc:
-                        esc = False
-                    elif c == "\\":
-                        esc = True
-                    elif c == '"':
-                        in_s = not in_s
-                    elif not in_s:
-                        if c == "{":
-                            depth += 1
-                        elif c == "}":
-                            depth -= 1
-                            if depth == 0:
-                                try:
-                                    return json.loads(html[pos:i+1])
-                                except Exception:
-                                    return {}
+        except Exception as e:
+            print(f"[{self.name}] 后端接口请求失败 [{url}]: {e}")
         return {}
 
     def _classes(self):
+        """获取分类与榜单定义"""
         if self.class_cache:
             return self.class_cache
-        arr = [
-            {"type_id": "short_play", "type_name": "真人短剧"},
-            {"type_id": "comic_series", "type_name": "动态漫剧"},
-            {"type_id": "ai_series", "type_name": "AI 短剧"},
-            {"type_id": "comic", "type_name": "精品动漫"},
-            {"type_id": "rank_hot", "type_name": "🔥 热播总榜"},
-            {"type_id": "rank_real", "type_name": "🎭 真人热榜"},
-            {"type_id": "rank_comic", "type_name": "🎨 漫剧热榜"},
-            {"type_id": "rank_ai", "type_name": "🤖 AI 剧热榜"},
-        ]
-        self.class_cache = arr
-        return arr
+        classes = []
+        # 1. 剧库分类
+        genres_data = self._api("/genres", {})
+        if isinstance(genres_data, list) and genres_data:
+            for g in genres_data:
+                classes.append({"type_id": g.get("key"), "type_name": g.get("name")})
+        else:
+            classes += [
+                {"type_id": "short_play", "type_name": "真人短剧"},
+                {"type_id": "comic_series", "type_name": "动态漫剧"},
+                {"type_id": "ai_series", "type_name": "AI 短剧"},
+                {"type_id": "comic", "type_name": "精品动漫"},
+            ]
+        # 2. 榜单分类
+        boards_data = self._api("/ranking-boards", {})
+        if isinstance(boards_data, list) and boards_data:
+            for b in boards_data:
+                classes.append({"type_id": "rank:" + b.get("id"), "type_name": "🔥 " + b.get("name")})
+        else:
+            classes += [
+                {"type_id": "rank:hongguo-hot", "type_name": "🔥 热播总榜"},
+                {"type_id": "rank:hongguo-real", "type_name": "🔥 真人热榜"},
+                {"type_id": "rank:hongguo-comic", "type_name": "🔥 漫剧热榜"},
+                {"type_id": "rank:hongguo-ai", "type_name": "🔥 AI 剧热榜"},
+            ]
+        self.class_cache = classes
+        return classes
 
     def _filters(self, classes):
         common = [
@@ -454,23 +356,21 @@ class Spider(BaseSpider):
         return {
             "vod_id": sid,
             "vod_name": name,
-            "vod_pic": self._pic(item),
+            "vod_pic": self._pic(item.get("cover") or item.get("series_cover") or item.get("pic")),
             "vod_remarks": remarks,
             "vod_year": score,
         }
 
-    def _pic(self, item):
-        if not isinstance(item, dict):
+    def _pic(self, cover):
+        if not cover:
             return ""
-        pic = item.get("cover") or item.get("series_cover") or item.get("vod_pic") or item.get("pic") or ""
-        if not pic:
-            return ""
-        if ".heic" in pic:
-            pic = pic.split("~")[0]
-        # 如果是第三方图片，走小果后端代理避免防盗链
-        if pic.startswith("http") and ("fqnovel" in pic or "byteimg" in pic):
-            return "%s/api/proxy/image?url=%s" % (self.host, quote(pic))
-        return pic
+        # 去除 HEIC 格式后缀
+        if ".heic" in cover:
+            cover = cover.split("~")[0]
+        # 走小果后端图片代理，避免跨域或防盗链
+        if self.proxy_cover and cover.startswith("http") and not cover.startswith(self.server_url):
+            return f"{self.server_url}/api/proxy/image?url={quote(cover)}"
+        return cover
 
     def _sid(self, x):
         return str(x or "").replace("hongguo:", "").strip()

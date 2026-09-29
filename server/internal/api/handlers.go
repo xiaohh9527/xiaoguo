@@ -108,6 +108,9 @@ func (s *Server) HandleRankings(w http.ResponseWriter, r *http.Request) {
 func (s *Server) HandleDetail(w http.ResponseWriter, r *http.Request) {
 	seriesID := r.URL.Query().Get("id")
 	if seriesID == "" {
+		seriesID = r.URL.Query().Get("series_id")
+	}
+	if seriesID == "" {
 		jsonError(w, http.StatusBadRequest, "缺少剧集 ID")
 		return
 	}
@@ -243,6 +246,12 @@ func (s *Server) HandleDanmaku(w http.ResponseWriter, r *http.Request) {
 func (s *Server) HandleSearch(w http.ResponseWriter, r *http.Request) {
 	keyword := r.URL.Query().Get("keyword")
 	if keyword == "" {
+		keyword = r.URL.Query().Get("key")
+	}
+	if keyword == "" {
+		keyword = r.URL.Query().Get("wd")
+	}
+	if keyword == "" {
 		jsonError(w, http.StatusBadRequest, "请输入搜索关键词")
 		return
 	}
@@ -344,6 +353,7 @@ func (s *Server) HandleClearHistory(w http.ResponseWriter, r *http.Request) {
 	_ = s.storage.ClearHistory()
 	jsonOK(w, true)
 }
+
 
 
 
