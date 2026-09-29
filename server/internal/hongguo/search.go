@@ -1,6 +1,7 @@
 package hongguo
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -42,16 +43,33 @@ func (c *Client) Search(ctx context.Context, keyword string) (SearchEntry, error
 	body, err := c.FetchWebText(ctx, pageURL, WebBaseURL+"/")
 
 	var dramas []Drama
-	seen := make(map[string]bool)
+	seenID := make(map[string]int)
+	seenTitle := make(map[string]int)
 
-	for _, d := range names {
-		if !seen[d.SourceID] {
-			seen[d.SourceID] = true
-			dramas = append(dramas, d)
+	addOrMerge := func(d Drama) {
+		if d.ID == "" || d.SourceID == "" {
+			return
 		}
+		normTitle := normalizeSearchText(d.DisplayTitle())
+		if idx, found := seenID[d.SourceID]; found {
+			dramas[idx] = mergeDrama(dramas[idx], d)
+			return
+		}
+		if normTitle != "" {
+			if idx, found := seenTitle[normTitle]; found {
+				dramas[idx] = mergeDrama(dramas[idx], d)
+				return
+			}
+		}
+		seenID[d.SourceID] = len(dramas)
+		if normTitle != "" {
+			seenTitle[normTitle] = len(dramas)
+		}
+		dramas = append(dramas, d)
 	}
 
-	total := len(dramas)
+	total := 0
+	// First add official web search page results (richer metadata: tags, desc, episodes)
 	if err == nil {
 		pageData := parseRouterData(body)
 		page := routerLoaderMap(pageData, "search_(keyword)/page", "search_")
@@ -59,16 +77,18 @@ func (c *Client) Search(ctx context.Context, keyword string) (SearchEntry, error
 		if ok {
 			for _, row := range rows {
 				d := dramaFromAny(row, "短剧")
-				if d.ID != "" && !seen[d.SourceID] {
-					seen[d.SourceID] = true
-					dramas = append(dramas, d)
-				}
+				addOrMerge(d)
 			}
 			t, _ := strconv.Atoi(mapString(page, "totalCount"))
 			if t > total {
 				total = t
 			}
 		}
+	}
+
+	// Then merge suggestion results
+	for _, d := range names {
+		addOrMerge(d)
 	}
 
 	// Sort results by relevance to query
@@ -106,6 +126,44 @@ func (c *Client) Search(ctx context.Context, keyword string) (SearchEntry, error
 	c.mu.Unlock()
 
 	return entry, nil
+}
+
+func mergeDrama(base, extra Drama) Drama {
+	if base.Title == "" || base.Title == base.SourceID {
+		base.Title = extra.Title
+		base.Name = extra.Name
+	}
+	if base.Cover == "" {
+		base.Cover = extra.Cover
+	}
+	if base.Desc == "" {
+		base.Desc = extra.Desc
+	}
+	if base.TotalEpisodes == 0 {
+		base.TotalEpisodes = extra.TotalEpisodes
+		base.EpisodeCount = extra.EpisodeCount
+	}
+	if base.Remark == "" {
+		base.Remark = extra.Remark
+	}
+	if base.Score == "" {
+		base.Score = extra.Score
+	}
+	if base.CategoryName == "" || base.CategoryName == "短剧" {
+		if extra.CategoryName != "" && extra.CategoryName != "短剧" {
+			base.CategoryName = extra.CategoryName
+		}
+	}
+	if len(base.Tags) == 0 {
+		base.Tags = extra.Tags
+	}
+	if base.Views == "" {
+		base.Views = extra.Views
+	}
+	if base.Heat == "" {
+		base.Heat = extra.Heat
+	}
+	return base
 }
 
 func (c *Client) FetchSuggestions(ctx context.Context, query string) ([]SearchSuggestion, error) {
@@ -153,7 +211,9 @@ func (c *Client) FetchSuggestions(ctx context.Context, query string) ([]SearchSu
 			} `json:"suggest_list"`
 		} `json:"data"`
 	}
-	_ = json.Unmarshal(body, &result)
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
+	_ = dec.Decode(&result)
 
 	rawItems := result.Items
 	if len(rawItems) == 0 {
@@ -210,7 +270,9 @@ func (c *Client) fetchSearchNames(ctx context.Context, keyword string) ([]Drama,
 			VideoData map[string]any `json:"video_data"`
 		} `json:"suggest_list"`
 	}
-	_ = json.Unmarshal(body, &res)
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
+	_ = dec.Decode(&res)
 
 	var list []Drama
 	seen := make(map[string]bool)
