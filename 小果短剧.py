@@ -10,12 +10,28 @@
 import json
 import os
 import re
-import ssl
 import sys
-import threading
 import time
 import traceback
 from urllib.parse import quote, unquote, urlencode
+
+try:
+    import ssl
+    _ssl_context = ssl._create_unverified_context()
+except Exception:
+    ssl = None
+    _ssl_context = None
+
+try:
+    import threading
+except Exception:
+    threading = None
+
+class _DummyLock:
+    def __enter__(self):
+        return self
+    def __exit__(self, *args):
+        pass
 
 try:
     import requests
@@ -24,11 +40,6 @@ except ImportError:
 
 import urllib.error
 import urllib.request
-
-try:
-    _ssl_context = ssl._create_unverified_context()
-except Exception:
-    _ssl_context = None
 
 try:
     from base.spider import Spider as BaseSpider
@@ -79,7 +90,7 @@ class Spider(BaseSpider):
         self.server_urls = ["http://127.0.0.1:8080"]
         self.active_server_url = self.server_urls[0]
         self.server_url = self.active_server_url
-        self.api = self.server_url + "/api"
+        self.api = self._clean_base_api(self.server_url)
         self.name = "小果短剧"
         self.quality = "1080"
         self.proxy_cover = True
@@ -93,8 +104,27 @@ class Spider(BaseSpider):
         else:
             self.session = None
         self.class_cache = None
-        self._lock = threading.Lock()
+        self._lock = threading.Lock() if threading is not None else _DummyLock()
         self._last_primary_probe = 0
+
+    def _clean_base_api(self, url):
+        u = str(url or "").rstrip("/")
+        if u.endswith("/api"):
+            return u
+        return u + "/api"
+
+    def _clean_origin_url(self, url):
+        u = str(url or "").rstrip("/")
+        if u.endswith("/api"):
+            u = u[:-4].rstrip("/")
+        return u
+
+    def _build_api_url(self, base_url, path):
+        clean_base = self._clean_origin_url(base_url)
+        clean_path = "/" + str(path or "").lstrip("/")
+        if not clean_path.startswith("/api/"):
+            clean_path = "/api" + clean_path
+        return clean_base + clean_path
 
     def _parse_server_urls(self, raw_val):
         """解析并格式化多后端地址列表，保持优先级顺序并去重"""
@@ -140,15 +170,17 @@ class Spider(BaseSpider):
         clean_url = str(url or "").rstrip("/")
         if not clean_url:
             return
+        origin_url = self._clean_origin_url(clean_url)
         with self._lock:
-            self.active_server_url = clean_url
-            self.server_url = clean_url
-            self.api = clean_url + "/api"
-            self.headers["Referer"] = clean_url + "/"
+            self.active_server_url = origin_url
+            self.server_url = origin_url
+            self.api = origin_url + "/api"
+            self.headers["Referer"] = origin_url + "/"
+            self._last_primary_probe = time.time()
             if self.session is not None:
                 self.session.headers.update(self.headers)
 
-    def init(self, extend=""):
+    def init(self, extend="", *args, **kwargs):
         """AList-TvBox 插件初始化，接收后台表单/JSON扩展配置"""
         parsed_urls = None
         if extend:
@@ -176,7 +208,6 @@ class Spider(BaseSpider):
         if parsed_urls:
             self.server_urls = parsed_urls
             self._set_active_server(self.server_urls[0])
-            self._last_primary_probe = 0
             self.class_cache = None
         else:
             self._set_active_server(self.server_urls[0])
@@ -187,7 +218,7 @@ class Spider(BaseSpider):
     def isAdult(self):
         return False
 
-    def homeContent(self, filter):
+    def homeContent(self, filter=True, *args, **kwargs):
         """首页推荐内容与分类列表 (纯后端驱动)"""
         classes = self._classes()
         data = self._api("/catalog", {"genre": "short_play", "offset": "0"})
@@ -200,7 +231,11 @@ class Spider(BaseSpider):
             "jx": 0,
         }
 
-    def categoryContent(self, tid, pg, filter, extend):
+    def homeVideoContent(self):
+        """TVBox 首页推荐视频兼容接口"""
+        return self.categoryContent("short_play", "1", None, {})
+
+    def categoryContent(self, tid="short_play", pg="1", filter=False, extend=None, *args, **kwargs):
         """分类与排行榜单翻页 (纯后端驱动)"""
         page = max(1, self._int(pg, 1))
         tid = str(tid or "short_play")
@@ -250,7 +285,7 @@ class Spider(BaseSpider):
             "jx": 0,
         }
 
-    def detailContent(self, ids):
+    def detailContent(self, ids, *args, **kwargs):
         """剧集详情与全部分集列表 (纯后端驱动)"""
         vid = self._sid(ids[0])
         data = self._api("/detail", {"id": vid})
@@ -289,7 +324,7 @@ class Spider(BaseSpider):
         }
         return {"list": [vod], "parse": 0, "jx": 0}
 
-    def searchContent(self, key, quick, pg="1"):
+    def searchContent(self, key, quick=False, pg="1", *args, **kwargs):
         """关键词搜索 (纯后端驱动)"""
         keyword = str(key).strip()
         data = self._api("/search", {"keyword": keyword})
@@ -305,10 +340,15 @@ class Spider(BaseSpider):
             "jx": 0,
         }
 
-    def playerContent(self, flag, id, vipFlags):
+    def searchContentPage(self, key, quick=False, pg="1", *args, **kwargs):
+        """TVBox 分页搜索兼容方法"""
+        return self.searchContent(key, quick, pg)
+
+    def playerContent(self, flag="", id="", vipFlags=False, *args, **kwargs):
         """播放地址解析，直接输出后端 1080P 解密流直链"""
         # id 格式为 sid|vid 或 vid
-        url = "%s/play?vid=%s&quality=%s" % (self.server_url, quote(str(id)), quote(str(self.quality)))
+        origin_url = self._clean_origin_url(self.server_url)
+        url = "%s/play?vid=%s&quality=%s" % (origin_url, quote(str(id)), quote(str(self.quality)))
         return {
             "parse": 0,
             "playUrl": "",
@@ -316,7 +356,7 @@ class Spider(BaseSpider):
             "jx": 0,
             "header": {
                 "User-Agent": self.headers["User-Agent"],
-                "Referer": self.server_url + "/",
+                "Referer": origin_url + "/",
             },
         }
 
@@ -370,12 +410,13 @@ class Spider(BaseSpider):
 
     def _do_request(self, base_url, path, params=None):
         """向指定 base_url 发起单次请求，成功返回 (True, data)，失败返回 (False, None)"""
-        url = base_url.rstrip("/") + path
+        url = self._build_api_url(base_url, path)
+        origin_url = self._clean_origin_url(base_url)
         try:
             if self.session is not None:
                 headers = dict(self.headers)
-                headers["Referer"] = base_url.rstrip("/") + "/"
-                r = self.session.get(url, params=params, headers=headers, timeout=(2.5, 6.0))
+                headers["Referer"] = origin_url + "/"
+                r = self.session.get(url, params=params, headers=headers, timeout=8)
                 if r.status_code == 200:
                     res = r.json()
                     if isinstance(res, dict) and res.get("code") == 0:
@@ -383,12 +424,11 @@ class Spider(BaseSpider):
             else:
                 qs = ("?" + urlencode(params)) if params else ""
                 headers = dict(self.headers)
-                headers["Referer"] = base_url.rstrip("/") + "/"
+                headers["Referer"] = origin_url + "/"
                 req = urllib.request.Request(url + qs, headers=headers)
-                ctx = _ssl_context if url.startswith("https://") else None
-                open_kwargs = {"timeout": 4.0}
-                if ctx is not None:
-                    open_kwargs["context"] = ctx
+                open_kwargs = {"timeout": 8}
+                if _ssl_context is not None and url.startswith("https://"):
+                    open_kwargs["context"] = _ssl_context
                 with urllib.request.urlopen(req, **open_kwargs) as resp:
                     if resp.status == 200:
                         res = json.loads(resp.read().decode("utf-8"))
@@ -405,7 +445,7 @@ class Spider(BaseSpider):
         for base_url in candidates:
             success, data = self._do_request(base_url, path, params)
             if success:
-                if base_url != self.active_server_url:
+                if self._clean_origin_url(base_url) != self.active_server_url:
                     print(f"[{self.name}] 切换至可用后端服务: {base_url}")
                     self._set_active_server(base_url)
                 return data
@@ -491,13 +531,14 @@ class Spider(BaseSpider):
         if ".heic" in cover:
             cover = cover.split("~")[0]
         # 走小果后端图片代理，避免跨域或防盗链
+        origin_url = self._clean_origin_url(self.server_url)
         if (
             self.proxy_cover
             and cover.startswith("http")
-            and not any(cover.startswith(u) for u in self.server_urls)
+            and not any(cover.startswith(self._clean_origin_url(u)) for u in self.server_urls)
             and "/api/proxy/image" not in cover
         ):
-            return f"{self.server_url}/api/proxy/image?url={quote(cover)}"
+            return f"{origin_url}/api/proxy/image?url={quote(cover)}"
         return cover
 
     def _sid(self, x):
