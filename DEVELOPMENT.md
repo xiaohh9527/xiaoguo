@@ -70,7 +70,7 @@
 2. **声明后台表单配置 Schema (`PLUGIN_CONFIG_SCHEMA`)**：
    - 必须在文件头部声明 `//@config-schema` 与 `PLUGIN_CONFIG_SCHEMA` 字典；
    - 支持在 AList-TvBox 网页管理后台直接通过**表单编辑**可视化配置：
-     - `server_url`：小果后端服务地址（默认 `http://127.0.0.1:8080`）
+     - `server_url`：小果后端服务地址（默认 `http://127.0.0.1:8080`，支持以逗号、分号或换行配置多个地址，按优先级顺序自动探测与故障转移）
      - `quality`：默认播放清晰度（默认 `1080`）
      - `proxy_cover`：海报后端代理开关（默认 `true`）
 3. **函数签名与返回值规范**：

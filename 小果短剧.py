@@ -2,15 +2,17 @@
 """
 //@name:小果短剧[短]
 //@id:xiaoguo_short_drama
-//@version:102
+//@version:103
 //@author:xiaoguo
-//@description:小果短剧全集解锁 AList-TvBox 插件，纯后端接口驱动，输出 1080P 超清解密流。
-//@config-schema:{"description":"小果短剧业务配置。配置小果后端服务地址后，电视端即可享受全集 1080P 解密播放、实时搜索、榜单与分类。来源：插件脚本声明","fields":[{"key":"server_url","label":"小果后端服务地址","type":"string","required":true,"defaultValue":"http://127.0.0.1:8080","placeholder":"http://192.168.1.100:8080 或 http://xiaoguo:8080","description":"小主机上部署的 xiaoguo 容器或后端服务访问地址（不要带末尾斜杠）。"},{"key":"quality","label":"默认播放清晰度","type":"string","required":false,"defaultValue":"1080","placeholder":"1080","description":"优先选择的清晰度（如 1080、720、540、480）。"},{"key":"proxy_cover","label":"海报走后端代理","type":"boolean","required":false,"defaultValue":true,"description":"开启后海报由小果后端代理缓存并转换为标准 JPEG，避免第三方防盗链及图片无法显示。"}]}
+//@description:小果短剧全集解锁 AList-TvBox 插件，纯后端接口驱动，支持多后端地址按顺序自动容灾故障切换，输出 1080P 超清解密流。
+//@config-schema:{"description":"小果短剧业务配置。配置小果后端服务地址后，电视端即可享受全集 1080P 解密播放、实时搜索、榜单与分类。支持配置多个后端地址按顺序自动故障转移。来源：插件脚本声明","fields":[{"key":"server_url","label":"小果后端服务地址(支持多地址)","type":"string","required":true,"defaultValue":"http://127.0.0.1:8080","placeholder":"http://192.168.1.100:8080,http://xiaoguo.lan:8080,https://ddns.example.com:8443","description":"小主机上部署的 xiaoguo 服务访问地址（不要带末尾斜杠）。支持配置多个地址（以逗号,、分号;或换行分隔），按配置顺序优先使用第一个可连通的后端地址。"},{"key":"quality","label":"默认播放清晰度","type":"string","required":false,"defaultValue":"1080","placeholder":"1080","description":"优先选择的清晰度（如 1080、720、540、480）。"},{"key":"proxy_cover","label":"海报走后端代理","type":"boolean","required":false,"defaultValue":true,"description":"开启后海报由小果后端代理缓存并转换为标准 JPEG，避免第三方防盗链及图片无法显示。"}]}
 """
 import json
 import os
 import re
+import ssl
 import sys
+import threading
 import time
 import traceback
 from urllib.parse import quote, unquote, urlencode
@@ -24,6 +26,11 @@ import urllib.error
 import urllib.request
 
 try:
+    _ssl_context = ssl._create_unverified_context()
+except Exception:
+    _ssl_context = None
+
+try:
     from base.spider import Spider as BaseSpider
 except Exception:
     class BaseSpider:
@@ -33,17 +40,17 @@ except Exception:
 # AList-TvBox 后台扩展配置表单声明 (供 AList-TVBox 自动渲染表单编辑界面)
 PLUGIN_CONFIG_SCHEMA = {
     "source": "declared",
-    "description": "小果短剧业务配置。配置小果后端服务地址后，电视端即可享受全集 1080P 解密播放、实时搜索、榜单与分类。来源：插件脚本声明",
+    "description": "小果短剧业务配置。配置小果后端服务地址后，电视端即可享受全集 1080P 解密播放、实时搜索、榜单与分类。支持配置多个后端地址按顺序自动故障转移。来源：插件脚本声明",
     "allowAdditional": True,
     "fields": [
         {
             "key": "server_url",
-            "label": "小果后端服务地址",
+            "label": "小果后端服务地址(支持多地址)",
             "type": "string",
             "required": True,
             "defaultValue": "http://127.0.0.1:8080",
-            "placeholder": "http://192.168.1.100:8080 或 http://xiaoguo:8080",
-            "description": "小主机上部署的 xiaoguo 容器或后端服务访问地址（不要带末尾斜杠）。",
+            "placeholder": "http://192.168.1.100:8080,http://xiaoguo.lan:8080,https://ddns.example.com:8443",
+            "description": "小主机上部署的 xiaoguo 服务访问地址（不要带末尾斜杠）。支持配置多个地址（以逗号,、分号;或换行分隔），按配置顺序优先使用第一个可连通的后端地址。",
         },
         {
             "key": "quality",
@@ -68,8 +75,10 @@ PLUGIN_CONFIG_SCHEMA = {
 
 class Spider(BaseSpider):
     def __init__(self):
-        # 默认后端地址，可通过 AList-TvBox 后台的“扩展配置”直接编辑修改
-        self.server_url = "http://127.0.0.1:8080"
+        # 候选后端地址列表与当前活跃后端地址，可通过 AList-TvBox 后台的“扩展配置”直接编辑修改
+        self.server_urls = ["http://127.0.0.1:8080"]
+        self.active_server_url = self.server_urls[0]
+        self.server_url = self.active_server_url
         self.api = self.server_url + "/api"
         self.name = "小果短剧"
         self.quality = "1080"
@@ -84,34 +93,93 @@ class Spider(BaseSpider):
         else:
             self.session = None
         self.class_cache = None
+        self._lock = threading.Lock()
+        self._last_primary_probe = 0
+
+    def _parse_server_urls(self, raw_val):
+        """解析并格式化多后端地址列表，保持优先级顺序并去重"""
+        urls = []
+
+        def _add_url(u):
+            if not u:
+                return
+            u_str = str(u).strip().strip("\"'").strip()
+            if not (u_str.startswith("http://") or u_str.startswith("https://")):
+                return
+            clean_u = u_str.rstrip("/")
+            if clean_u and clean_u not in urls:
+                urls.append(clean_u)
+
+        if isinstance(raw_val, (list, tuple)):
+            for item in raw_val:
+                if isinstance(item, str):
+                    for sub in re.split(r"[\r\n,;\s\|]+", item):
+                        _add_url(sub)
+                else:
+                    _add_url(item)
+        elif isinstance(raw_val, str):
+            raw_str = raw_val.strip()
+            if raw_str.startswith("[") and raw_str.endswith("]"):
+                try:
+                    parsed_list = json.loads(raw_str)
+                    if isinstance(parsed_list, list):
+                        for item in parsed_list:
+                            _add_url(item)
+                except Exception:
+                    pass
+            if not urls:
+                for sub in re.split(r"[\r\n,;\s\|]+", raw_str):
+                    _add_url(sub)
+        elif raw_val:
+            _add_url(raw_val)
+
+        return urls if urls else ["http://127.0.0.1:8080"]
+
+    def _set_active_server(self, url):
+        """原子切换当前活跃后端地址，并同步更新请求头与上下文"""
+        clean_url = str(url or "").rstrip("/")
+        if not clean_url:
+            return
+        with self._lock:
+            self.active_server_url = clean_url
+            self.server_url = clean_url
+            self.api = clean_url + "/api"
+            self.headers["Referer"] = clean_url + "/"
+            if self.session is not None:
+                self.session.headers.update(self.headers)
 
     def init(self, extend=""):
         """AList-TvBox 插件初始化，接收后台表单/JSON扩展配置"""
+        parsed_urls = None
         if extend:
             try:
                 cfg = json.loads(extend) if isinstance(extend, str) else extend
                 if isinstance(cfg, dict):
-                    self.server_url = (
-                        cfg.get("server_url")
+                    raw_server = (
+                        cfg.get("server_urls")
+                        or cfg.get("server_url")
                         or cfg.get("site")
                         or cfg.get("host")
                         or cfg.get("bridge")
                         or cfg.get("base_url")
-                        or self.server_url
-                    ).rstrip("/")
+                    )
+                    if raw_server:
+                        parsed_urls = self._parse_server_urls(raw_server)
                     self.quality = str(cfg.get("quality") or self.quality)
                     if "proxy_cover" in cfg:
                         self.proxy_cover = bool(cfg.get("proxy_cover"))
-                elif str(extend).strip().startswith("http"):
-                    self.server_url = str(extend).strip().rstrip("/")
+                else:
+                    parsed_urls = self._parse_server_urls(extend)
             except Exception:
-                if str(extend).strip().startswith("http"):
-                    self.server_url = str(extend).strip().rstrip("/")
+                parsed_urls = self._parse_server_urls(extend)
 
-        self.api = self.server_url + "/api"
-        self.headers["Referer"] = self.server_url + "/"
-        if self.session is not None:
-            self.session.headers.update(self.headers)
+        if parsed_urls:
+            self.server_urls = parsed_urls
+            self._set_active_server(self.server_urls[0])
+            self._last_primary_probe = 0
+            self.class_cache = None
+        else:
+            self._set_active_server(self.server_urls[0])
 
     def getName(self):
         return self.name
@@ -265,29 +333,84 @@ class Spider(BaseSpider):
         self.class_cache = None
 
     # ==========================================
-    # 纯后端 API 通信工具
+    # 纯后端 API 通信工具 (支持多后端顺序容灾选优)
     # ==========================================
-    def _api(self, path, params=None):
-        """调用小果后端 API，获取标准 JSON 数据"""
-        path = "/" + path.lstrip("/")
-        url = self.api + path
+    def _get_candidate_urls(self):
+        """获取按优先级排序的候选请求服务器列表"""
+        with self._lock:
+            urls = list(self.server_urls)
+            active = self.active_server_url
+            last_probe = self._last_primary_probe
+
+        if not urls:
+            return ["http://127.0.0.1:8080"]
+        if len(urls) == 1:
+            return urls
+
+        primary = urls[0]
+        now = time.time()
+
+        # 如果当前活跃的已经是最高优先级的首选地址
+        if active == primary:
+            return urls
+
+        # 当前处于备用降级地址：检查是否到达恢复探测冷却时间（180秒）
+        if now - last_probe >= 180:
+            with self._lock:
+                self._last_primary_probe = now
+            # 优先从最高优先级地址重新开始尝试
+            return urls
+        else:
+            # 冷却期内优先复用当前已通的备用地址以保障秒开体验，其余地址作为后备
+            candidates = [active]
+            for u in urls:
+                if u != active:
+                    candidates.append(u)
+            return candidates
+
+    def _do_request(self, base_url, path, params=None):
+        """向指定 base_url 发起单次请求，成功返回 (True, data)，失败返回 (False, None)"""
+        url = base_url.rstrip("/") + path
         try:
             if self.session is not None:
-                r = self.session.get(url, params=params, timeout=10)
+                headers = dict(self.headers)
+                headers["Referer"] = base_url.rstrip("/") + "/"
+                r = self.session.get(url, params=params, headers=headers, timeout=(2.5, 6.0))
                 if r.status_code == 200:
                     res = r.json()
-                    if res.get("code") == 0:
-                        return res.get("data", res)
+                    if isinstance(res, dict) and res.get("code") == 0:
+                        return True, res.get("data", res)
             else:
                 qs = ("?" + urlencode(params)) if params else ""
-                req = urllib.request.Request(url + qs, headers=self.headers)
-                with urllib.request.urlopen(req, timeout=10) as resp:
+                headers = dict(self.headers)
+                headers["Referer"] = base_url.rstrip("/") + "/"
+                req = urllib.request.Request(url + qs, headers=headers)
+                ctx = _ssl_context if url.startswith("https://") else None
+                open_kwargs = {"timeout": 4.0}
+                if ctx is not None:
+                    open_kwargs["context"] = ctx
+                with urllib.request.urlopen(req, **open_kwargs) as resp:
                     if resp.status == 200:
                         res = json.loads(resp.read().decode("utf-8"))
-                        if res.get("code") == 0:
-                            return res.get("data", res)
-        except Exception as e:
-            print(f"[{self.name}] 后端接口请求失败 [{url}]: {e}")
+                        if isinstance(res, dict) and res.get("code") == 0:
+                            return True, res.get("data", res)
+        except Exception:
+            pass
+        return False, None
+
+    def _api(self, path, params=None):
+        """调用小果后端 API，支持多后端地址按顺序探测与自动故障转移"""
+        path = "/" + path.lstrip("/")
+        candidates = self._get_candidate_urls()
+        for base_url in candidates:
+            success, data = self._do_request(base_url, path, params)
+            if success:
+                if base_url != self.active_server_url:
+                    print(f"[{self.name}] 切换至可用后端服务: {base_url}")
+                    self._set_active_server(base_url)
+                return data
+
+        print(f"[{self.name}] 所有后端接口均无法连通: {candidates}, 接口路径: {path}")
         return {}
 
     def _classes(self):
@@ -368,7 +491,12 @@ class Spider(BaseSpider):
         if ".heic" in cover:
             cover = cover.split("~")[0]
         # 走小果后端图片代理，避免跨域或防盗链
-        if self.proxy_cover and cover.startswith("http") and not cover.startswith(self.server_url):
+        if (
+            self.proxy_cover
+            and cover.startswith("http")
+            and not any(cover.startswith(u) for u in self.server_urls)
+            and "/api/proxy/image" not in cover
+        ):
             return f"{self.server_url}/api/proxy/image?url={quote(cover)}"
         return cover
 
