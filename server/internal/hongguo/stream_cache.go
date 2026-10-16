@@ -83,7 +83,11 @@ func (sm *StreamManager) cleanHEICCache() {
 }
 
 func (sm *StreamManager) GetDecryptedVideo(ctx context.Context, seriesID, videoID string, variant MediaVariant) (string, error) {
-	cacheFileName := fmt.Sprintf("%s_%s_%d.mp4", seriesID, videoID, variant.Quality)
+	seriesID = strings.TrimPrefix(strings.TrimSpace(seriesID), "hongguo:")
+	videoID = strings.TrimPrefix(strings.TrimSpace(videoID), "hongguo-cenc://")
+	safeSeriesID := strings.ReplaceAll(seriesID, ":", "_")
+	safeVideoID := strings.ReplaceAll(videoID, ":", "_")
+	cacheFileName := fmt.Sprintf("%s_%s_%d.mp4", safeSeriesID, safeVideoID, variant.Quality)
 	cacheFilePath := filepath.Join(sm.cacheDir, "videos", cacheFileName)
 
 	// Check if already cached and valid
@@ -164,7 +168,13 @@ func (sm *StreamManager) GetDecryptedVideo(ctx context.Context, seriesID, videoI
 		job.err = err
 		return "", err
 	}
-	_ = os.Rename(tempPath, cacheFilePath)
+	if err := os.Rename(tempPath, cacheFilePath); err != nil {
+		_ = os.Remove(cacheFilePath)
+		if err := os.Rename(tempPath, cacheFilePath); err != nil {
+			job.err = err
+			return "", err
+		}
+	}
 
 	job.path = cacheFilePath
 	return cacheFilePath, nil

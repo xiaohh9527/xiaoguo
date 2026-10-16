@@ -104,11 +104,21 @@ func (c *Client) resolveAppMedia(ctx context.Context, seriesID, videoID string) 
 	duration, _ := strconv.ParseFloat(mapString(model, "video_duration", "duration"), 64)
 	var variants []MediaVariant
 
+	hasStandardCodec := false
 	for _, v := range rawVariants {
 		meta := nestedMap(v, "video_meta")
 		codec := strings.ToLower(firstNonEmpty(mapString(meta, "codec_type"), mapString(v, "codec_type")))
-		if codec == "bytevc2" {
-			continue // Skip bytevc2 as it's not browser-compatible
+		if codec != "" && codec != "bytevc2" {
+			hasStandardCodec = true
+			break
+		}
+	}
+
+	for _, v := range rawVariants {
+		meta := nestedMap(v, "video_meta")
+		codec := strings.ToLower(firstNonEmpty(mapString(meta, "codec_type"), mapString(v, "codec_type")))
+		if codec == "bytevc2" && hasStandardCodec {
+			continue // Skip bytevc2 when standard codecs (h264/bytevc1) are available
 		}
 
 		urls := extractMediaURLs(v)
@@ -160,17 +170,28 @@ func (c *Client) resolveAppMedia(ctx context.Context, seriesID, videoID string) 
 		return PlaybackInfo{}, errors.New("无兼容的视频编码")
 	}
 
-	// Sort by quality descending
+	// Sort by quality descending, with codec preference: h264 > bytevc1 > bytevc2
 	sort.SliceStable(variants, func(i, j int) bool {
-		// Prefer H264 if quality is same
-		if variants[i].Quality == variants[j].Quality {
-			iH264 := variants[i].Codec == "h264" || variants[i].Codec == "avc1"
-			jH264 := variants[j].Codec == "h264" || variants[j].Codec == "avc1"
-			if iH264 != jH264 {
-				return iH264
+		codecScore := func(c string) int {
+			switch c {
+			case "h264", "avc1":
+				return 3
+			case "bytevc1", "hevc", "h265":
+				return 2
+			case "bytevc2":
+				return 1
+			default:
+				return 0
 			}
 		}
-		return variants[i].Quality > variants[j].Quality
+		if variants[i].Quality != variants[j].Quality {
+			return variants[i].Quality > variants[j].Quality
+		}
+		sI, sJ := codecScore(variants[i].Codec), codecScore(variants[j].Codec)
+		if sI != sJ {
+			return sI > sJ
+		}
+		return false
 	})
 
 	return PlaybackInfo{
@@ -363,4 +384,3 @@ func decodeBackupPlaybackResponse(body string) ([]byte, error) {
 	}
 	return plain[:len(plain)-pad], nil
 }
-

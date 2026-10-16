@@ -133,8 +133,8 @@ func (s *Server) HandleDetail(w http.ResponseWriter, r *http.Request) {
 // GET /api/play?series_id=...&video_id=...
 func (s *Server) HandlePlay(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	seriesID := q.Get("series_id")
-	videoID := q.Get("video_id")
+	seriesID := strings.TrimPrefix(strings.TrimSpace(q.Get("series_id")), "hongguo:")
+	videoID := strings.TrimPrefix(strings.TrimSpace(q.Get("video_id")), "hongguo-cenc://")
 
 	if seriesID == "" || videoID == "" {
 		jsonError(w, http.StatusBadRequest, "缺少参数")
@@ -177,6 +177,8 @@ func (s *Server) HandleStream(w http.ResponseWriter, r *http.Request) {
 		}
 		videoID = parts[1]
 	}
+	seriesID = strings.TrimPrefix(strings.TrimSpace(seriesID), "hongguo:")
+	videoID = strings.TrimPrefix(strings.TrimSpace(videoID), "hongguo-cenc://")
 	if seriesID == "" {
 		seriesID = videoID
 	}

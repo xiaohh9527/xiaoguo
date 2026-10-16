@@ -58,7 +58,7 @@ func NewClient() *Client {
 		MaxIdleConns:        100,
 		MaxIdleConnsPerHost: 32,
 		IdleConnTimeout:     90 * time.Second,
-		DisableCompression: false,
+		DisableCompression:  false,
 	}
 
 	return &Client{
@@ -147,7 +147,7 @@ func (c *Client) AppRequest(ctx context.Context, method, path string, extra url.
 			req.Header.Set("Comment-Source", "601")
 			req.Header.Set("Server-Channel", "1000")
 			signHongguoCommentRequest(req, nonce, now)
-		} else {
+		} else if !strings.Contains(path, "video_model") && attempt == 0 {
 			signHongguoRequest(req, body, now)
 		}
 
@@ -348,4 +348,3 @@ func dramaFromAny(v any, defaultCategory string) Drama {
 		ReleaseStatus: releaseStatus,
 	}
 }
-
