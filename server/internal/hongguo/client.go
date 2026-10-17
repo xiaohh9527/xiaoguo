@@ -103,7 +103,11 @@ func (c *Client) AppRequest(ctx context.Context, method, path string, extra url.
 		"iid":                   {installID},
 	}
 	for k, v := range extra {
-		query[k] = append([]string(nil), v...)
+		if len(v) == 0 || (len(v) == 1 && v[0] == "") {
+			delete(query, k)
+		} else {
+			query[k] = append([]string(nil), v...)
+		}
 	}
 
 	var body []byte

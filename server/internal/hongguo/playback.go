@@ -51,21 +51,7 @@ func (c *Client) ResolvePlayback(ctx context.Context, seriesID, videoID string) 
 	return PlaybackInfo{}, fmt.Errorf("解析播放地址失败: app=%v, web=%v, backup=%w", appErr, webErr, apiErr)
 }
 
-func (c *Client) resolveAppMedia(ctx context.Context, seriesID, videoID string) (PlaybackInfo, error) {
-	payload := map[string]any{
-		"video_id":     videoID,
-		"content_type": 1,
-		"biz_param": map[string]any{
-			"need_all_video_definition": true,
-			"video_platform":            3,
-		},
-	}
-
-	result, err := c.AppRequest(ctx, http.MethodPost, "/novel/player/video_model/v1/", nil, payload, false)
-	if err != nil {
-		return PlaybackInfo{}, err
-	}
-
+func parseVideoModelMap(result map[string]any) map[string]any {
 	data := nestedMap(result, "data")
 	model, _ := data["video_model"].(map[string]any)
 	if encoded, ok := data["video_model"].(string); ok {
@@ -76,7 +62,10 @@ func (c *Client) resolveAppMedia(ctx context.Context, seriesID, videoID string) 
 			model = decoded
 		}
 	}
+	return model
+}
 
+func parseRawVariants(model map[string]any) []map[string]any {
 	var rawVariants []map[string]any
 	if list, ok := model["video_list"].([]any); ok {
 		for _, v := range list {
@@ -96,6 +85,47 @@ func (c *Client) resolveAppMedia(ctx context.Context, seriesID, videoID string) 
 			}
 		}
 	}
+	return rawVariants
+}
+
+func (c *Client) resolveAppMedia(ctx context.Context, seriesID, videoID string) (PlaybackInfo, error) {
+	payload := map[string]any{
+		"video_id":     videoID,
+		"content_type": 1,
+		"biz_param": map[string]any{
+			"need_all_video_definition": true,
+			"video_platform":            3,
+		},
+	}
+
+	result, err := c.AppRequest(ctx, http.MethodPost, "/novel/player/video_model/v1/", nil, payload, false)
+	if err != nil {
+		return PlaybackInfo{}, err
+	}
+
+	model := parseVideoModelMap(result)
+	rawVariants := parseRawVariants(model)
+
+	// Check if any variant uses bytevc2 (which causes black screen / no video on third-party players)
+	hasByteVC2 := false
+	for _, v := range rawVariants {
+		meta := nestedMap(v, "video_meta")
+		codec := strings.ToLower(firstNonEmpty(mapString(meta, "codec_type"), mapString(v, "codec_type")))
+		if codec == "bytevc2" {
+			hasByteVC2 = true
+			break
+		}
+	}
+
+	// If bytevc2 is present, fetch fallback compatible streams without update_version_code to get standard bytevc1 (H.265/HEVC)
+	if hasByteVC2 {
+		compatResult, compatErr := c.AppRequest(ctx, http.MethodPost, "/novel/player/video_model/v1/", url.Values{"update_version_code": {""}}, payload, false)
+		if compatErr == nil {
+			compatModel := parseVideoModelMap(compatResult)
+			compatVariants := parseRawVariants(compatModel)
+			rawVariants = append(rawVariants, compatVariants...)
+		}
+	}
 
 	if len(rawVariants) == 0 {
 		return PlaybackInfo{}, errors.New("无可用视频流")
@@ -104,43 +134,11 @@ func (c *Client) resolveAppMedia(ctx context.Context, seriesID, videoID string) 
 	duration, _ := strconv.ParseFloat(mapString(model, "video_duration", "duration"), 64)
 	var variants []MediaVariant
 
-	// Check if each resolution already has standard codecs (h264 / bytevc1)
-	standardByQuality := make(map[int]bool)
 	for _, v := range rawVariants {
 		meta := nestedMap(v, "video_meta")
 		codec := strings.ToLower(firstNonEmpty(mapString(meta, "codec_type"), mapString(v, "codec_type")))
-		def := firstNonEmpty(mapString(meta, "definition"), mapString(v, "definition"))
-		height, _ := strconv.Atoi(firstNonEmpty(mapString(meta, "vheight"), mapString(v, "vheight")))
-		q := height
-		if num, err := strconv.Atoi(qualityNumber.FindString(def)); err == nil && num > 0 {
-			q = num
-		}
-		if q == 0 {
-			q = 720
-		}
-		if codec != "" && codec != "bytevc2" {
-			standardByQuality[q] = true
-		}
-	}
-
-	for _, v := range rawVariants {
-		meta := nestedMap(v, "video_meta")
-		codec := strings.ToLower(firstNonEmpty(mapString(meta, "codec_type"), mapString(v, "codec_type")))
-		def := firstNonEmpty(mapString(meta, "definition"), mapString(v, "definition"))
-		height, _ := strconv.Atoi(firstNonEmpty(mapString(meta, "vheight"), mapString(v, "vheight")))
-		width, _ := strconv.Atoi(firstNonEmpty(mapString(meta, "vwidth"), mapString(v, "vwidth")))
-		sz, _ := strconv.ParseInt(firstNonEmpty(mapString(meta, "size"), mapString(v, "size")), 10, 64)
-
-		quality := height
-		if q, err := strconv.Atoi(qualityNumber.FindString(def)); err == nil && q > 0 {
-			quality = q
-		}
-		if quality == 0 {
-			quality = 720
-		}
-
-		// Skip bytevc2 only if the same quality already has standard codecs (h264/bytevc1)
-		if codec == "bytevc2" && standardByQuality[quality] {
+		if codec == "bytevc2" {
+			// Strictly skip bytevc2 as third-party players (TVBox/IJK/ExoPlayer/VLC) cannot decode its video track
 			continue
 		}
 
@@ -159,6 +157,19 @@ func (c *Client) resolveAppMedia(ctx context.Context, seriesID, videoID string) 
 			if err == nil && len(k) == 16 {
 				keyHex = hex.EncodeToString(k)
 			}
+		}
+
+		def := firstNonEmpty(mapString(meta, "definition"), mapString(v, "definition"))
+		height, _ := strconv.Atoi(firstNonEmpty(mapString(meta, "vheight"), mapString(v, "vheight")))
+		width, _ := strconv.Atoi(firstNonEmpty(mapString(meta, "vwidth"), mapString(v, "vwidth")))
+		sz, _ := strconv.ParseInt(firstNonEmpty(mapString(meta, "size"), mapString(v, "size")), 10, 64)
+
+		quality := height
+		if q, err := strconv.Atoi(qualityNumber.FindString(def)); err == nil && q > 0 {
+			quality = q
+		}
+		if quality == 0 {
+			quality = 720
 		}
 
 		for _, u := range urls {
