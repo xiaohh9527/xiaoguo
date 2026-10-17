@@ -1,10 +1,12 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"xiaoguo/server/internal/hongguo"
 	"xiaoguo/server/internal/storage"
@@ -122,6 +124,17 @@ func (s *Server) HandleDetail(w http.ResponseWriter, r *http.Request) {
 	}
 
 	isFav := s.storage.IsFavorite(drama.SourceID)
+
+	// 异步静默预热第 1 集（用户进入详情页停留选集时后台预热，点击即秒开）
+	if len(chapters) > 0 {
+		go func(dramaID, firstVideoID string) {
+			bgCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+			if playInfo, err := s.client.ResolvePlayback(bgCtx, dramaID, firstVideoID); err == nil {
+				_, _ = s.stream.GetDecryptedVideo(bgCtx, dramaID, firstVideoID, playInfo.Selected)
+			}
+		}(drama.ID, chapters[0].VideoID)
+	}
 
 	jsonOK(w, map[string]any{
 		"drama":      drama,
@@ -263,7 +276,68 @@ func (s *Server) HandleStream(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Disposition", "attachment; filename=\""+fileName+"\"")
 	}
 
+	// 异步静默预热下一集，实现连播时零等待秒开
+	go s.prefetchNextEpisode(seriesID, videoID, quality)
+
 	http.ServeFile(w, r, filePath)
+}
+
+func (s *Server) prefetchNextEpisode(seriesID, currentVideoID string, quality int) {
+	bgCtx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	_, chapters, err := s.client.FetchDetail(bgCtx, seriesID)
+	if err != nil || len(chapters) == 0 {
+		return
+	}
+
+	nextIdx := -1
+	for i, ch := range chapters {
+		if ch.VideoID == currentVideoID {
+			nextIdx = i + 1
+			break
+		}
+	}
+
+	if nextIdx >= 0 && nextIdx < len(chapters) {
+		nextChapter := chapters[nextIdx]
+		info, err := s.client.ResolvePlayback(bgCtx, seriesID, nextChapter.VideoID)
+		if err != nil {
+			return
+		}
+
+		selected := info.Selected
+		if quality > 0 && len(info.Variants) > 0 {
+			var exact hongguo.MediaVariant
+			foundExact := false
+			var closest hongguo.MediaVariant
+			minDiff := 999999
+
+			for _, v := range info.Variants {
+				if v.Quality == quality {
+					exact = v
+					foundExact = true
+					break
+				}
+				diff := v.Quality - quality
+				if diff < 0 {
+					diff = -diff
+				}
+				if diff < minDiff {
+					minDiff = diff
+					closest = v
+				}
+			}
+
+			if foundExact {
+				selected = exact
+			} else if minDiff < 999999 {
+				selected = closest
+			}
+		}
+
+		_, _ = s.stream.GetDecryptedVideo(bgCtx, seriesID, nextChapter.VideoID, selected)
+	}
 }
 
 // GET /api/danmaku?series_id=...&video_id=...&start_ms=0&duration_ms=600000
@@ -399,7 +473,3 @@ func (s *Server) HandleClearHistory(w http.ResponseWriter, r *http.Request) {
 	_ = s.storage.ClearHistory()
 	jsonOK(w, true)
 }
-
-
-
-

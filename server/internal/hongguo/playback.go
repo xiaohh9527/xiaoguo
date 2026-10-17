@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const backupPlaybackAPI = "https://djapi.999888456.xyz/api/hongguo/play"
@@ -30,6 +31,58 @@ func (c *Client) ResolvePlayback(ctx context.Context, seriesID, videoID string) 
 		seriesID = videoID
 	}
 
+	cacheKey := seriesID + ":" + videoID
+
+	// 1. Check memory cache (0ms instant hit)
+	c.mu.Lock()
+	if entry, ok := c.playbacks[cacheKey]; ok && time.Now().Before(entry.expiresAt) {
+		c.mu.Unlock()
+		return entry.info, nil
+	}
+
+	// 2. Singleflight: deduplicate in-flight requests for the same video
+	if job, ok := c.playbackJobs[cacheKey]; ok {
+		c.mu.Unlock()
+		select {
+		case <-job.done:
+			return job.info, job.err
+		case <-ctx.Done():
+			return PlaybackInfo{}, ctx.Err()
+		}
+	}
+
+	job := &playbackJob{done: make(chan struct{})}
+	c.playbackJobs[cacheKey] = job
+	c.mu.Unlock()
+
+	defer func() {
+		c.mu.Lock()
+		delete(c.playbackJobs, cacheKey)
+		close(job.done)
+		c.mu.Unlock()
+	}()
+
+	info, err := c.doResolvePlayback(ctx, seriesID, videoID)
+	if err != nil {
+		job.err = err
+		return PlaybackInfo{}, err
+	}
+
+	c.mu.Lock()
+	if len(c.playbacks) >= 2048 {
+		c.playbacks = make(map[string]playbackCacheEntry)
+	}
+	c.playbacks[cacheKey] = playbackCacheEntry{
+		info:      info,
+		expiresAt: time.Now().Add(45 * time.Minute),
+	}
+	c.mu.Unlock()
+
+	job.info = info
+	return info, nil
+}
+
+func (c *Client) doResolvePlayback(ctx context.Context, seriesID, videoID string) (PlaybackInfo, error) {
 	// 1. Try App video model
 	info, appErr := c.resolveAppMedia(ctx, seriesID, videoID)
 	if appErr == nil && len(info.Variants) > 0 {

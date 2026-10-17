@@ -1,12 +1,15 @@
 package hongguo
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"crypto/md5"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -16,10 +19,11 @@ import (
 )
 
 type StreamManager struct {
-	cacheDir string
-	client   *Client
-	mu       sync.Mutex
-	inFlight map[string]*streamJob
+	cacheDir    string
+	client      *Client
+	videoClient *http.Client
+	mu          sync.Mutex
+	inFlight    map[string]*streamJob
 }
 
 type streamJob struct {
@@ -47,9 +51,29 @@ func NewStreamManager(cacheDir string, client *Client) *StreamManager {
 	_ = os.MkdirAll(filepath.Join(cacheDir, "images"), 0755)
 	_ = os.MkdirAll(filepath.Join(cacheDir, "videos"), 0755)
 
+	videoTransport := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 90 * time.Second,
+		}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          120,
+		MaxIdleConnsPerHost:   50,
+		IdleConnTimeout:       120 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		ReadBufferSize:        128 * 1024,
+		WriteBufferSize:       128 * 1024,
+	}
+
 	sm := &StreamManager{
 		cacheDir: cacheDir,
 		client:   client,
+		videoClient: &http.Client{
+			Transport: videoTransport,
+			Timeout:   60 * time.Second,
+		},
 		inFlight: make(map[string]*streamJob),
 	}
 
@@ -127,7 +151,7 @@ func (sm *StreamManager) GetDecryptedVideo(ctx context.Context, seriesID, videoI
 	req.Header.Set("User-Agent", AppUserAgent)
 	req.Header.Set("Referer", "https://novel.snssdk.com/")
 
-	resp, err := sm.client.DoHTTP(req)
+	resp, err := sm.videoClient.Do(req)
 	if err != nil {
 		job.err = err
 		return "", err
@@ -139,10 +163,21 @@ func (sm *StreamManager) GetDecryptedVideo(ctx context.Context, seriesID, videoI
 		return "", job.err
 	}
 
-	rawBytes, err := io.ReadAll(io.LimitReader(resp.Body, 500<<20)) // Max 500MB
-	if err != nil {
-		job.err = err
-		return "", err
+	var rawBytes []byte
+	if resp.ContentLength > 0 && resp.ContentLength < 500<<20 {
+		buf := bytes.NewBuffer(make([]byte, 0, resp.ContentLength))
+		reader := bufio.NewReaderSize(resp.Body, 128*1024)
+		if _, err := io.Copy(buf, reader); err != nil {
+			job.err = err
+			return "", err
+		}
+		rawBytes = buf.Bytes()
+	} else {
+		rawBytes, err = io.ReadAll(io.LimitReader(resp.Body, 500<<20))
+		if err != nil {
+			job.err = err
+			return "", err
+		}
 	}
 
 	var finalBytes []byte
@@ -178,6 +213,15 @@ func (sm *StreamManager) GetDecryptedVideo(ctx context.Context, seriesID, videoI
 
 	job.path = cacheFilePath
 	return cacheFilePath, nil
+}
+
+// PrefetchVideo triggers a non-blocking asynchronous prefetch of the decrypted video into local disk cache
+func (sm *StreamManager) PrefetchVideo(ctx context.Context, seriesID, videoID string, variant MediaVariant) {
+	go func() {
+		bgCtx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+		defer cancel()
+		_, _ = sm.GetDecryptedVideo(bgCtx, seriesID, videoID, variant)
+	}()
 }
 
 func (sm *StreamManager) ProxyImage(ctx context.Context, imgURL string, w http.ResponseWriter, r *http.Request) error {

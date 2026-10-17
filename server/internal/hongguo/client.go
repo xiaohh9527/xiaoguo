@@ -27,14 +27,27 @@ var numericID = regexp.MustCompile(`^[0-9]{1,32}$`)
 var qualityNumber = regexp.MustCompile(`[0-9]+`)
 
 type Client struct {
-	mu          sync.Mutex
-	httpClient  *http.Client
-	deviceID    string
-	installID   string
-	details     map[string]detailCacheEntry
-	searches    map[string]SearchEntry
-	suggestions map[string]suggestionCacheEntry
-	danmaku     map[string]danmakuCacheEntry
+	mu           sync.Mutex
+	httpClient   *http.Client
+	deviceID     string
+	installID    string
+	details      map[string]detailCacheEntry
+	searches     map[string]SearchEntry
+	suggestions  map[string]suggestionCacheEntry
+	danmaku      map[string]danmakuCacheEntry
+	playbacks    map[string]playbackCacheEntry
+	playbackJobs map[string]*playbackJob
+}
+
+type playbackCacheEntry struct {
+	info      PlaybackInfo
+	expiresAt time.Time
+}
+
+type playbackJob struct {
+	done chan struct{}
+	info PlaybackInfo
+	err  error
 }
 
 type detailCacheEntry struct {
@@ -55,10 +68,11 @@ type danmakuCacheEntry struct {
 
 func NewClient() *Client {
 	transport := &http.Transport{
-		MaxIdleConns:        100,
-		MaxIdleConnsPerHost: 32,
-		IdleConnTimeout:     90 * time.Second,
+		MaxIdleConns:        120,
+		MaxIdleConnsPerHost: 40,
+		IdleConnTimeout:     120 * time.Second,
 		DisableCompression:  false,
+		ForceAttemptHTTP2:   true,
 	}
 
 	return &Client{
@@ -66,12 +80,14 @@ func NewClient() *Client {
 			Transport: transport,
 			Timeout:   35 * time.Second,
 		},
-		deviceID:    newHongguoDeviceID(),
-		installID:   newHongguoDeviceID(),
-		details:     make(map[string]detailCacheEntry),
-		searches:    make(map[string]SearchEntry),
-		suggestions: make(map[string]suggestionCacheEntry),
-		danmaku:     make(map[string]danmakuCacheEntry),
+		deviceID:     newHongguoDeviceID(),
+		installID:    newHongguoDeviceID(),
+		details:      make(map[string]detailCacheEntry),
+		searches:     make(map[string]SearchEntry),
+		suggestions:  make(map[string]suggestionCacheEntry),
+		danmaku:      make(map[string]danmakuCacheEntry),
+		playbacks:    make(map[string]playbackCacheEntry),
+		playbackJobs: make(map[string]*playbackJob),
 	}
 }
 
