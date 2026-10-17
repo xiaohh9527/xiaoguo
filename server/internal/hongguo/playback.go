@@ -104,21 +104,44 @@ func (c *Client) resolveAppMedia(ctx context.Context, seriesID, videoID string) 
 	duration, _ := strconv.ParseFloat(mapString(model, "video_duration", "duration"), 64)
 	var variants []MediaVariant
 
-	hasStandardCodec := false
+	// Check if each resolution already has standard codecs (h264 / bytevc1)
+	standardByQuality := make(map[int]bool)
 	for _, v := range rawVariants {
 		meta := nestedMap(v, "video_meta")
 		codec := strings.ToLower(firstNonEmpty(mapString(meta, "codec_type"), mapString(v, "codec_type")))
+		def := firstNonEmpty(mapString(meta, "definition"), mapString(v, "definition"))
+		height, _ := strconv.Atoi(firstNonEmpty(mapString(meta, "vheight"), mapString(v, "vheight")))
+		q := height
+		if num, err := strconv.Atoi(qualityNumber.FindString(def)); err == nil && num > 0 {
+			q = num
+		}
+		if q == 0 {
+			q = 720
+		}
 		if codec != "" && codec != "bytevc2" {
-			hasStandardCodec = true
-			break
+			standardByQuality[q] = true
 		}
 	}
 
 	for _, v := range rawVariants {
 		meta := nestedMap(v, "video_meta")
 		codec := strings.ToLower(firstNonEmpty(mapString(meta, "codec_type"), mapString(v, "codec_type")))
-		if codec == "bytevc2" && hasStandardCodec {
-			continue // Skip bytevc2 when standard codecs (h264/bytevc1) are available
+		def := firstNonEmpty(mapString(meta, "definition"), mapString(v, "definition"))
+		height, _ := strconv.Atoi(firstNonEmpty(mapString(meta, "vheight"), mapString(v, "vheight")))
+		width, _ := strconv.Atoi(firstNonEmpty(mapString(meta, "vwidth"), mapString(v, "vwidth")))
+		sz, _ := strconv.ParseInt(firstNonEmpty(mapString(meta, "size"), mapString(v, "size")), 10, 64)
+
+		quality := height
+		if q, err := strconv.Atoi(qualityNumber.FindString(def)); err == nil && q > 0 {
+			quality = q
+		}
+		if quality == 0 {
+			quality = 720
+		}
+
+		// Skip bytevc2 only if the same quality already has standard codecs (h264/bytevc1)
+		if codec == "bytevc2" && standardByQuality[quality] {
+			continue
 		}
 
 		urls := extractMediaURLs(v)
@@ -136,19 +159,6 @@ func (c *Client) resolveAppMedia(ctx context.Context, seriesID, videoID string) 
 			if err == nil && len(k) == 16 {
 				keyHex = hex.EncodeToString(k)
 			}
-		}
-
-		def := firstNonEmpty(mapString(meta, "definition"), mapString(v, "definition"))
-		height, _ := strconv.Atoi(firstNonEmpty(mapString(meta, "vheight"), mapString(v, "vheight")))
-		width, _ := strconv.Atoi(firstNonEmpty(mapString(meta, "vwidth"), mapString(v, "vwidth")))
-		sz, _ := strconv.ParseInt(firstNonEmpty(mapString(meta, "size"), mapString(v, "size")), 10, 64)
-
-		quality := height
-		if q, err := strconv.Atoi(qualityNumber.FindString(def)); err == nil && q > 0 {
-			quality = q
-		}
-		if quality == 0 {
-			quality = 720
 		}
 
 		for _, u := range urls {

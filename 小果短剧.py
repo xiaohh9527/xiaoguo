@@ -2,10 +2,10 @@
 """
 //@name:小果短剧[短]
 //@id:xiaoguo_short_drama
-//@version:103
+//@version:104
 //@author:xiaoguo
-//@description:小果短剧全集解锁 AList-TvBox 插件，纯后端接口驱动，支持多后端地址按顺序自动容灾故障切换，输出 1080P 超清解密流。
-//@config-schema:{"description":"小果短剧业务配置。配置小果后端服务地址后，电视端即可享受全集 1080P 解密播放、实时搜索、榜单与分类。支持配置多个后端地址按顺序自动故障转移。来源：插件脚本声明","fields":[{"key":"server_url","label":"小果后端服务地址(支持多地址)","type":"string","required":true,"defaultValue":"http://127.0.0.1:8080","placeholder":"http://192.168.1.100:8080,http://xiaoguo.lan:8080,https://ddns.example.com:8443","description":"小主机上部署的 xiaoguo 服务访问地址（不要带末尾斜杠）。支持配置多个地址（以逗号,、分号;或换行分隔），按配置顺序优先使用第一个可连通的后端地址。"},{"key":"quality","label":"默认播放清晰度","type":"string","required":false,"defaultValue":"1080","placeholder":"1080","description":"优先选择的清晰度（如 1080、720、540、480）。"},{"key":"proxy_cover","label":"海报走后端代理","type":"boolean","required":false,"defaultValue":true,"description":"开启后海报由小果后端代理缓存并转换为标准 JPEG，避免第三方防盗链及图片无法显示。"}]}
+//@description:小果短剧全集解锁 AList-TvBox 插件，纯后端接口驱动，支持多后端地址按顺序自动容灾故障切换，支持在播放器端按线路自由切换 1080P/720P/540P/480P 常用分辨率。
+//@config-schema:{"description":"小果短剧业务配置。配置小果后端服务地址后，电视端即可享受全集解密播放、实时搜索、榜单与分类。支持配置多个后端地址按顺序自动故障转移，支持在播放器端多线路自由切换分辨率。来源：插件脚本声明","fields":[{"key":"server_url","label":"小果后端服务地址(支持多地址)","type":"string","required":true,"defaultValue":"http://127.0.0.1:8080","placeholder":"http://192.168.1.100:8080,http://xiaoguo.lan:8080,https://ddns.example.com:8443","description":"小主机上部署的 xiaoguo 服务访问地址（不要带末尾斜杠）。支持配置多个地址（以逗号,、分号;或换行分隔），按配置顺序优先使用第一个可连通的后端地址。"},{"key":"quality","label":"默认首选清晰度","type":"string","required":false,"defaultValue":"1080","placeholder":"1080","description":"播放器默认排在第一位的首选分辨率（常用值：1080、720、540、480）。播放器选集界面的线路列表里可随时自由切换其他常用分辨率。"},{"key":"proxy_cover","label":"海报走后端代理","type":"boolean","required":false,"defaultValue":true,"description":"开启后海报由小果后端代理缓存并转换为标准 JPEG，避免第三方防盗链及图片无法显示。"}]}
 """
 import json
 import os
@@ -65,12 +65,12 @@ PLUGIN_CONFIG_SCHEMA = {
         },
         {
             "key": "quality",
-            "label": "默认播放清晰度",
+            "label": "默认首选清晰度",
             "type": "string",
             "required": False,
             "defaultValue": "1080",
             "placeholder": "1080",
-            "description": "优先选择的清晰度（如 1080、720、540、480）。",
+            "description": "播放器默认排在第一位的首选分辨率（常用值：1080、720、540、480）。播放器选集界面的线路列表里可随时自由切换其他常用分辨率。",
         },
         {
             "key": "proxy_cover",
@@ -286,7 +286,7 @@ class Spider(BaseSpider):
         }
 
     def detailContent(self, ids, *args, **kwargs):
-        """剧集详情与全部分集列表 (纯后端驱动)"""
+        """剧集详情与全部分集列表 (纯后端驱动，支持播放器端常用分辨率多线路自由切换)"""
         vid = self._sid(ids[0])
         data = self._api("/detail", {"id": vid})
         if not isinstance(data, dict):
@@ -297,16 +297,33 @@ class Spider(BaseSpider):
         name = drama.get("title") or drama.get("name") or vid
         count = drama.get("totalEpisodes") or len(chapters) or 1
 
-        play = []
-        if chapters:
-            for i, c in enumerate(chapters, 1):
-                idx = c.get("index") or i
-                title = c.get("title") or ("第%s集" % idx)
-                chapter_vid = str(c.get("videoId") or "")
-                # 遵循 AList-TvBox 标准管道符分隔格式：第1集$sid|vid
-                play.append("%s$%s|%s" % (title, vid, chapter_vid))
-        else:
-            play = ["第%s集$%s|%s" % (i, vid, i) for i in range(1, count + 1)]
+        # 常用分辨率档位列表，按配置的默认首选清晰度置顶排序
+        all_qualities = ["1080", "720", "540", "480"]
+        pref_q = str(self.quality or "1080").strip()
+        sorted_qualities = [pref_q] if pref_q in all_qualities else [all_qualities[0]]
+        for q in all_qualities:
+            if q not in sorted_qualities:
+                sorted_qualities.append(q)
+
+        play_from = []
+        play_urls = []
+
+        for q in sorted_qualities:
+            line_name = f"{self.name}·{q}P"
+            play_items = []
+            if chapters:
+                for i, c in enumerate(chapters, 1):
+                    idx = c.get("index") or i
+                    title = c.get("title") or ("第%s集" % idx)
+                    chapter_vid = str(c.get("videoId") or "")
+                    # 遵循 AList-TvBox 标准管道符分隔格式：第1集$sid|vid|quality
+                    play_items.append("%s$%s|%s|%s" % (title, vid, chapter_vid, q))
+            else:
+                for i in range(1, count + 1):
+                    play_items.append("第%s集$%s|%s|%s" % (i, vid, i, q))
+
+            play_from.append(line_name)
+            play_urls.append("#".join(play_items))
 
         vod = {
             "vod_id": vid,
@@ -319,8 +336,8 @@ class Spider(BaseSpider):
             "vod_actor": "",
             "vod_director": "",
             "vod_content": drama.get("desc") or name,
-            "vod_play_from": self.name,
-            "vod_play_url": "#".join(play),
+            "vod_play_from": "$$$".join(play_from),
+            "vod_play_url": "$$$".join(play_urls),
         }
         return {"list": [vod], "parse": 0, "jx": 0}
 
@@ -345,10 +362,26 @@ class Spider(BaseSpider):
         return self.searchContent(key, quick, pg)
 
     def playerContent(self, flag="", id="", vipFlags=False, *args, **kwargs):
-        """播放地址解析，直接输出后端 1080P 解密流直链"""
-        # id 格式为 sid|vid 或 vid
+        """播放地址解析，直接输出所选分辨率的后端解密流直链"""
+        # id 格式支持: sid|vid|quality, sid|vid, vid 等
+        target_q = str(self.quality or "1080").strip()
+        clean_vid = str(id or "").strip()
+
+        # 1. 尝试从 id 中提取目标 quality (格式: sid|vid|quality 或 sid*vid*quality)
+        parts = re.split(r"[\|\*]", clean_vid)
+        if len(parts) >= 3 and parts[2].isdigit():
+            clean_vid = f"{parts[0]}|{parts[1]}"
+            target_q = parts[2]
+        elif len(parts) == 2:
+            clean_vid = f"{parts[0]}|{parts[1]}"
+
+        # 2. 尝试从当前播放线路名 flag 中提取分辨率 (例如 '小果短剧·720P' -> '720')
+        flag_match = re.search(r"(\d{3,4})", str(flag or ""))
+        if flag_match:
+            target_q = flag_match.group(1)
+
         origin_url = self._clean_origin_url(self.server_url)
-        url = "%s/play?vid=%s&quality=%s" % (origin_url, quote(str(id)), quote(str(self.quality)))
+        url = "%s/play?vid=%s&quality=%s" % (origin_url, quote(str(clean_vid)), quote(str(target_q)))
         return {
             "parse": 0,
             "playUrl": "",

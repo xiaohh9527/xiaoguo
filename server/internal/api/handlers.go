@@ -164,25 +164,49 @@ func (s *Server) HandleStream(w http.ResponseWriter, r *http.Request) {
 	if videoID == "" {
 		videoID = q.Get("id")
 	}
+
+	quality, _ := strconv.Atoi(q.Get("quality"))
+
+	// Support composite id: series_id|video_id|quality or series_id*video_id*quality
 	if strings.Contains(videoID, "*") {
-		parts := strings.SplitN(videoID, "*", 2)
-		if seriesID == "" {
-			seriesID = parts[0]
+		parts := strings.Split(videoID, "*")
+		if len(parts) >= 3 {
+			if seriesID == "" {
+				seriesID = parts[0]
+			}
+			videoID = parts[1]
+			if quality == 0 {
+				quality, _ = strconv.Atoi(parts[2])
+			}
+		} else if len(parts) == 2 {
+			if seriesID == "" {
+				seriesID = parts[0]
+			}
+			videoID = parts[1]
 		}
-		videoID = parts[1]
 	} else if strings.Contains(videoID, "|") {
-		parts := strings.SplitN(videoID, "|", 2)
-		if seriesID == "" {
-			seriesID = parts[0]
+		parts := strings.Split(videoID, "|")
+		if len(parts) >= 3 {
+			if seriesID == "" {
+				seriesID = parts[0]
+			}
+			videoID = parts[1]
+			if quality == 0 {
+				quality, _ = strconv.Atoi(parts[2])
+			}
+		} else if len(parts) == 2 {
+			if seriesID == "" {
+				seriesID = parts[0]
+			}
+			videoID = parts[1]
 		}
-		videoID = parts[1]
 	}
+
 	seriesID = strings.TrimPrefix(strings.TrimSpace(seriesID), "hongguo:")
 	videoID = strings.TrimPrefix(strings.TrimSpace(videoID), "hongguo-cenc://")
 	if seriesID == "" {
 		seriesID = videoID
 	}
-	quality, _ := strconv.Atoi(q.Get("quality"))
 
 	if videoID == "" {
 		http.Error(w, "missing video_id or vid", http.StatusBadRequest)
@@ -195,14 +219,34 @@ func (s *Server) HandleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Match quality variant
+	// Match quality variant: exact match first, then closest match
 	selected := info.Selected
-	if quality > 0 {
+	if quality > 0 && len(info.Variants) > 0 {
+		var exact hongguo.MediaVariant
+		foundExact := false
+		var closest hongguo.MediaVariant
+		minDiff := 999999
+
 		for _, v := range info.Variants {
 			if v.Quality == quality {
-				selected = v
+				exact = v
+				foundExact = true
 				break
 			}
+			diff := v.Quality - quality
+			if diff < 0 {
+				diff = -diff
+			}
+			if diff < minDiff {
+				minDiff = diff
+				closest = v
+			}
+		}
+
+		if foundExact {
+			selected = exact
+		} else if minDiff < 999999 {
+			selected = closest
 		}
 	}
 
