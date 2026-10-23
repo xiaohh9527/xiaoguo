@@ -104,10 +104,32 @@ func (c *Client) doResolvePlayback(ctx context.Context, seriesID, videoID string
 	return PlaybackInfo{}, fmt.Errorf("解析播放地址失败: app=%v, web=%v, backup=%w", appErr, webErr, apiErr)
 }
 
-func parseVideoModelMap(result map[string]any) map[string]any {
+func parseVideoModelMap(result map[string]any, videoID string) map[string]any {
 	data := nestedMap(result, "data")
-	model, _ := data["video_model"].(map[string]any)
-	if encoded, ok := data["video_model"].(string); ok {
+	var rawModel any
+	if videoID != "" {
+		if item := nestedMap(data, videoID); len(item) > 0 {
+			rawModel = item["video_model"]
+		}
+	}
+	if rawModel == nil {
+		rawModel = data["video_model"]
+	}
+	if rawModel == nil {
+		for _, v := range data {
+			if item, ok := v.(map[string]any); ok {
+				if m, ok := item["video_model"]; ok && m != nil {
+					rawModel = m
+					break
+				}
+			}
+		}
+	}
+
+	var model map[string]any
+	if m, ok := rawModel.(map[string]any); ok {
+		model = m
+	} else if encoded, ok := rawModel.(string); ok && encoded != "" {
 		var decoded map[string]any
 		dec := json.NewDecoder(strings.NewReader(encoded))
 		dec.UseNumber()
@@ -143,20 +165,19 @@ func parseRawVariants(model map[string]any) []map[string]any {
 
 func (c *Client) resolveAppMedia(ctx context.Context, seriesID, videoID string) (PlaybackInfo, error) {
 	payload := map[string]any{
-		"video_id":     videoID,
-		"content_type": 1,
+		"video_id": videoID,
 		"biz_param": map[string]any{
+			"video_platform":            1024,
 			"need_all_video_definition": true,
-			"video_platform":            3,
 		},
 	}
 
-	result, err := c.AppRequest(ctx, http.MethodPost, "/novel/player/video_model/v1/", nil, payload, false)
+	result, err := c.AppRequest(ctx, http.MethodPost, "/novel/player/multi_video_model/v1/", nil, payload, false)
 	if err != nil {
 		return PlaybackInfo{}, err
 	}
 
-	model := parseVideoModelMap(result)
+	model := parseVideoModelMap(result, videoID)
 	rawVariants := parseRawVariants(model)
 
 	// Check if any variant uses bytevc2 (which causes black screen / no video on third-party players)
@@ -172,9 +193,9 @@ func (c *Client) resolveAppMedia(ctx context.Context, seriesID, videoID string) 
 
 	// If bytevc2 is present, fetch fallback compatible streams without update_version_code to get standard bytevc1 (H.265/HEVC)
 	if hasByteVC2 {
-		compatResult, compatErr := c.AppRequest(ctx, http.MethodPost, "/novel/player/video_model/v1/", url.Values{"update_version_code": {""}}, payload, false)
+		compatResult, compatErr := c.AppRequest(ctx, http.MethodPost, "/novel/player/multi_video_model/v1/", url.Values{"update_version_code": {""}}, payload, false)
 		if compatErr == nil {
-			compatModel := parseVideoModelMap(compatResult)
+			compatModel := parseVideoModelMap(compatResult, videoID)
 			compatVariants := parseRawVariants(compatModel)
 			rawVariants = append(rawVariants, compatVariants...)
 		}
@@ -289,6 +310,31 @@ func (c *Client) resolveWebMedia(ctx context.Context, seriesID, videoID string) 
 	info, _ := page["video_player_info"].(map[string]any)
 	urls := extractMediaURLs(info)
 	if len(urls) == 0 {
+		// Fallback: check if official web public preview MP4 is accessible (free episodes)
+		publicURL := fmt.Sprintf("%s/video/public/%s/360p.mp4", WebBaseURL, url.PathEscape(videoID))
+		req, headErr := http.NewRequestWithContext(ctx, http.MethodHead, publicURL, nil)
+		if headErr == nil {
+			req.Header.Set("User-Agent", WebUserAgent)
+			req.Header.Set("Referer", WebBaseURL+"/")
+			if resp, err := c.httpClient.Do(req); err == nil {
+				_ = resp.Body.Close()
+				if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusPartialContent {
+					variant := MediaVariant{
+						URL:        publicURL,
+						Definition: "360p",
+						Quality:    360,
+						Codec:      "h264",
+						Encrypted:  false,
+					}
+					return PlaybackInfo{
+						SeriesID: seriesID,
+						VideoID:  videoID,
+						Selected: variant,
+						Variants: []MediaVariant{variant},
+					}, nil
+				}
+			}
+		}
 		return PlaybackInfo{}, errors.New("网页该集未提供播放地址")
 	}
 
