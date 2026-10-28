@@ -165,6 +165,9 @@ func parseRawVariants(model map[string]any) []map[string]any {
 
 func (c *Client) resolveAppMedia(ctx context.Context, seriesID, videoID string) (PlaybackInfo, error) {
 	payload := map[string]any{
+		"mixed_video_id_map": map[string]any{
+			"1004": []string{videoID},
+		},
 		"video_id": videoID,
 		"biz_param": map[string]any{
 			"video_platform":            1024,

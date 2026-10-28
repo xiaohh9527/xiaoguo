@@ -9,6 +9,8 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -19,18 +21,93 @@ import (
 const (
 	AppBaseURL   = "https://api5-normal-sinfonlineb.fqnovel.com"
 	WebBaseURL   = "https://hongguoduanju.com"
-	AppUserAgent = "com.phoenix.read/73532 (Linux; U; Android 7.1.2; zh_CN; 25053RT47C; Build/N2G47H; Cronet/TTNetVersion:04657795 2026-01-23 QuicVersion:c67e9834 2025-09-08)"
+	AppUserAgent = "com.phoenix.read/73932 (Linux; U; Android 7.1.2; zh_CN; Xiaomi 14; Build/N2G47H; Cronet/TTNetVersion:8d40f833 QuicVersion:462f352c 2026-08-31)"
 	WebUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
 )
 
 var numericID = regexp.MustCompile(`^[0-9]{1,32}$`)
 var qualityNumber = regexp.MustCompile(`[0-9]+`)
 
+type DeviceProfile struct {
+	DeviceID    string `json:"device_id"`
+	InstallID   string `json:"install_id"`
+	IID         string `json:"iid,omitempty"`
+	CDID        string `json:"cdid"`
+	OpenUDID    string `json:"openudid"`
+	DeviceToken string `json:"device_token,omitempty"`
+	TTReq       string `json:"ttreq,omitempty"`
+	DeviceBrand string `json:"device_brand"`
+	DeviceType  string `json:"device_type"`
+	OSVersion   string `json:"os_version"`
+	OSAPI       string `json:"os_api"`
+	Resolution  string `json:"resolution"`
+	DPI         string `json:"dpi"`
+	Channel     string `json:"channel"`
+}
+
+func defaultDeviceProfile() DeviceProfile {
+	return DeviceProfile{
+		DeviceID:    "797614684305320",
+		InstallID:   "797614683457464",
+		CDID:        "f222479a-ffa6-4262-bab8-279d9f701ee8",
+		OpenUDID:    "892bdf31d465060d",
+		DeviceToken: "AAARG6S7APMJXJ3HIBZZGM3YMBLRS2TOFDNYTTHYSS7WQXDM4MPDYOJQYRS3M3YVHVE3NEQD3CAQBHF47A22CD5A4RGK72QM2VRDETBDGDUD4ZOPEWIUAVV23AEYA",
+		TTReq:       "1$df51b637fb4664e066427b792fa89b0ee9ae9eac",
+		DeviceBrand: "xiaomi",
+		DeviceType:  "23127PN0CC",
+		OSVersion:   "7.1.2",
+		OSAPI:       "25",
+		Resolution:  "1200*2670",
+		DPI:         "460",
+		Channel:     "xiaomi_8662_64",
+	}
+}
+
+func loadDeviceProfile() DeviceProfile {
+	dev := defaultDeviceProfile()
+	candidates := []string{
+		"data/device.json",
+		"device.json",
+	}
+	if appData := os.Getenv("APPDATA"); appData != "" {
+		candidates = append(candidates, filepath.Join(appData, "hgplayer", "device.json"))
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		candidates = append(candidates, filepath.Join(home, ".config", "hgplayer", "device.json"))
+	}
+
+	for _, p := range candidates {
+		if data, err := os.ReadFile(p); err == nil && len(data) > 0 {
+			var loaded DeviceProfile
+			if err := json.Unmarshal(data, &loaded); err == nil && loaded.DeviceID != "" {
+				if loaded.CDID != "" {
+					dev.CDID = loaded.CDID
+				}
+				if loaded.OpenUDID != "" {
+					dev.OpenUDID = loaded.OpenUDID
+				}
+				if loaded.DeviceID != "" {
+					dev.DeviceID = loaded.DeviceID
+				}
+				if loaded.InstallID != "" {
+					dev.InstallID = loaded.InstallID
+				} else if loaded.IID != "" {
+					dev.InstallID = loaded.IID
+				}
+				if loaded.Channel != "" {
+					dev.Channel = loaded.Channel
+				}
+				break
+			}
+		}
+	}
+	return dev
+}
+
 type Client struct {
 	mu           sync.Mutex
 	httpClient   *http.Client
-	deviceID     string
-	installID    string
+	device       DeviceProfile
 	details      map[string]detailCacheEntry
 	searches     map[string]SearchEntry
 	suggestions  map[string]suggestionCacheEntry
@@ -80,8 +157,7 @@ func NewClient() *Client {
 			Transport: transport,
 			Timeout:   35 * time.Second,
 		},
-		deviceID:     newHongguoDeviceID(),
-		installID:    newHongguoDeviceID(),
+		device:       loadDeviceProfile(),
 		details:      make(map[string]detailCacheEntry),
 		searches:     make(map[string]SearchEntry),
 		suggestions:  make(map[string]suggestionCacheEntry),
@@ -93,30 +169,32 @@ func NewClient() *Client {
 
 func (c *Client) AppRequest(ctx context.Context, method, path string, extra url.Values, payload any, isComment bool) (map[string]any, error) {
 	c.mu.Lock()
-	deviceID, installID := c.deviceID, c.installID
+	dev := c.device
 	c.mu.Unlock()
 
 	query := url.Values{
 		"aid":                   {"8662"},
 		"app_name":              {"novelread"},
-		"version_code":          {"73532"},
-		"version_name":          {"7.3.5.32"},
-		"manifest_version_code": {"73532"},
-		"update_version_code":   {"73532"},
-		"channel":               {"update_64"},
+		"version_code":          {"73932"},
+		"version_name":          {"7.3.9.32"},
+		"manifest_version_code": {"73932"},
+		"update_version_code":   {"73932"},
+		"channel":               {dev.Channel},
 		"device_platform":       {"android"},
 		"os":                    {"android"},
 		"ssmix":                 {"a"},
-		"device_type":           {"25053RT47C"},
-		"device_brand":          {"Redmi"},
+		"device_type":           {dev.DeviceType},
+		"device_brand":          {dev.DeviceBrand},
 		"language":              {"zh"},
 		"os_api":                {"25"},
 		"os_version":            {"7.1.2"},
-		"resolution":            {"1280*2772"},
-		"dpi":                   {"520"},
+		"resolution":            {dev.Resolution},
+		"dpi":                   {dev.DPI},
 		"ac":                    {"wifi"},
-		"device_id":             {deviceID},
-		"iid":                   {installID},
+		"device_id":             {dev.DeviceID},
+		"iid":                   {dev.InstallID},
+		"cdid":                  {dev.CDID},
+		"openudid":              {dev.OpenUDID},
 	}
 	for k, v := range extra {
 		if len(v) == 0 || (len(v) == 1 && v[0] == "") {
@@ -167,6 +245,13 @@ func (c *Client) AppRequest(ctx context.Context, method, path string, extra url.
 			req.Header.Set("Comment-Source", "601")
 			req.Header.Set("Server-Channel", "1000")
 			signHongguoCommentRequest(req, nonce, now)
+		} else if strings.Contains(path, "video_detail") {
+			nonce, nonceErr := newHongguoCommentNonce()
+			if nonceErr == nil {
+				req.Header.Set("Comment-Source", "601")
+				req.Header.Set("Server-Channel", "1000")
+				signHongguoCommentRequest(req, nonce, now)
+			}
 		} else if !strings.Contains(path, "video_model") && attempt == 0 {
 			signHongguoRequest(req, body, now)
 		}
