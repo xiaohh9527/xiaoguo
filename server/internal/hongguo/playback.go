@@ -1,6 +1,7 @@
 package hongguo
 
 import (
+	"bytes"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
@@ -9,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math/bits"
 	"net/http"
 	"net/url"
@@ -83,15 +85,15 @@ func (c *Client) ResolvePlayback(ctx context.Context, seriesID, videoID string) 
 }
 
 func (c *Client) doResolvePlayback(ctx context.Context, seriesID, videoID string) (PlaybackInfo, error) {
-	// 1. Try App video model
-	info, appErr := c.resolveAppMedia(ctx, seriesID, videoID)
-	if appErr == nil && len(info.Variants) > 0 {
+	// 1. Try Web player first (uses official unencrypted fallback-play-info: 100% reliable, zero risk of WAF block)
+	info, webErr := c.resolveWebMedia(ctx, seriesID, videoID)
+	if webErr == nil && len(info.Variants) > 0 {
 		return info, nil
 	}
 
-	// 2. Try Web player
-	info, webErr := c.resolveWebMedia(ctx, seriesID, videoID)
-	if webErr == nil && len(info.Variants) > 0 {
+	// 2. Try App video model
+	info, appErr := c.resolveAppMedia(ctx, seriesID, videoID)
+	if appErr == nil && len(info.Variants) > 0 {
 		return info, nil
 	}
 
@@ -101,7 +103,7 @@ func (c *Client) doResolvePlayback(ctx context.Context, seriesID, videoID string
 		return info, nil
 	}
 
-	return PlaybackInfo{}, fmt.Errorf("解析播放地址失败: app=%v, web=%v, backup=%w", appErr, webErr, apiErr)
+	return PlaybackInfo{}, fmt.Errorf("解析播放地址失败: web=%v, app=%v, backup=%w", webErr, appErr, apiErr)
 }
 
 func parseVideoModelMap(result map[string]any, videoID string) map[string]any {
@@ -301,53 +303,80 @@ func (c *Client) resolveAppMedia(ctx context.Context, seriesID, videoID string) 
 	}, nil
 }
 
-func (c *Client) resolveWebMedia(ctx context.Context, seriesID, videoID string) (PlaybackInfo, error) {
-	pageURL := fmt.Sprintf("%s/player/%s/%s", WebBaseURL, url.PathEscape(seriesID), url.PathEscape(videoID))
-	body, err := c.FetchWebText(ctx, pageURL, WebBaseURL+"/")
+func (c *Client) fetchWebProtectedFallbackPlayInfo(ctx context.Context, seriesID, videoID string) (PlaybackInfo, error) {
+	payload := map[string]string{
+		"series_id": seriesID,
+		"video_id":  videoID,
+		"item_id":   videoID,
+	}
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return PlaybackInfo{}, err
 	}
 
-	data := parseRouterData(body)
-	page := routerLoaderMap(data, "player_", "player_page")
-	info, _ := page["video_player_info"].(map[string]any)
-	urls := extractMediaURLs(info)
-	if len(urls) == 0 {
-		// Fallback: check if official web public preview MP4 is accessible (free episodes)
-		publicURL := fmt.Sprintf("%s/video/public/%s/360p.mp4", WebBaseURL, url.PathEscape(videoID))
-		req, headErr := http.NewRequestWithContext(ctx, http.MethodHead, publicURL, nil)
-		if headErr == nil {
-			req.Header.Set("User-Agent", WebUserAgent)
-			req.Header.Set("Referer", WebBaseURL+"/")
-			if resp, err := c.httpClient.Do(req); err == nil {
-				_ = resp.Body.Close()
-				if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusPartialContent {
-					variant := MediaVariant{
-						URL:        publicURL,
-						Definition: "360p",
-						Quality:    360,
-						Codec:      "h264",
-						Encrypted:  false,
-					}
-					return PlaybackInfo{
-						SeriesID: seriesID,
-						VideoID:  videoID,
-						Selected: variant,
-						Variants: []MediaVariant{variant},
-					}, nil
-				}
-			}
-		}
-		return PlaybackInfo{}, errors.New("网页该集未提供播放地址")
+	apiURL := WebBaseURL + "/api/video/protected/fallback-play-info?aid=8662"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(body))
+	if err != nil {
+		return PlaybackInfo{}, err
+	}
+	req.Header.Set("User-Agent", WebUserAgent)
+	req.Header.Set("Referer", WebBaseURL+"/")
+	req.Header.Set("Origin", WebBaseURL)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/plain, */*")
+	req.Header.Set("Sec-Fetch-Dest", "empty")
+	req.Header.Set("Sec-Fetch-Mode", "cors")
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return PlaybackInfo{}, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return PlaybackInfo{}, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 
-	duration, _ := strconv.ParseFloat(mapString(info, "duration"), 64)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return PlaybackInfo{}, err
+	}
+
+	var res struct {
+		MainURL   string `json:"main_url"`
+		URLExpire int64  `json:"url_expire"`
+		BaseResp  struct {
+			StatusCode    int    `json:"StatusCode"`
+			StatusMessage string `json:"StatusMessage"`
+		} `json:"base_resp"`
+	}
+	if err := json.Unmarshal(respBody, &res); err != nil {
+		return PlaybackInfo{}, err
+	}
+
+	mainURL := strings.TrimSpace(res.MainURL)
+	if res.BaseResp.StatusCode != 0 || mainURL == "" {
+		return PlaybackInfo{}, fmt.Errorf("fallback-play-info code %d: %s", res.BaseResp.StatusCode, res.BaseResp.StatusMessage)
+	}
+
+	// Provide standard quality definition lines (1080p, 720p, 540p, 480p) pointing to this high-quality unencrypted stream
+	qualities := []struct {
+		def string
+		q   int
+	}{
+		{"1080p", 1080},
+		{"720p", 720},
+		{"540p", 540},
+		{"480p", 480},
+	}
 	var variants []MediaVariant
-	for _, u := range urls {
+	for _, item := range qualities {
 		variants = append(variants, MediaVariant{
-			URL:        u,
-			Definition: "1080p",
-			Quality:    1080,
+			URL:        mainURL,
+			Definition: item.def,
+			Quality:    item.q,
+			Codec:      "h264",
 			Encrypted:  false,
 		})
 	}
@@ -355,10 +384,73 @@ func (c *Client) resolveWebMedia(ctx context.Context, seriesID, videoID string) 
 	return PlaybackInfo{
 		SeriesID: seriesID,
 		VideoID:  videoID,
-		Duration: duration,
 		Selected: variants[0],
 		Variants: variants,
 	}, nil
+}
+
+func (c *Client) resolveWebMedia(ctx context.Context, seriesID, videoID string) (PlaybackInfo, error) {
+	// 1. Try official unencrypted fallback-play-info API first (high quality, full episode, zero WAF risk)
+	if info, err := c.fetchWebProtectedFallbackPlayInfo(ctx, seriesID, videoID); err == nil && len(info.Variants) > 0 {
+		return info, nil
+	}
+
+	// 2. Try router page data
+	pageURL := fmt.Sprintf("%s/player/%s/%s", WebBaseURL, url.PathEscape(seriesID), url.PathEscape(videoID))
+	body, err := c.FetchWebText(ctx, pageURL, WebBaseURL+"/")
+	if err == nil {
+		data := parseRouterData(body)
+		page := routerLoaderMap(data, "player_", "player_page")
+		info, _ := page["video_player_info"].(map[string]any)
+		urls := extractMediaURLs(info)
+		if len(urls) > 0 {
+			duration, _ := strconv.ParseFloat(mapString(info, "duration"), 64)
+			var variants []MediaVariant
+			for _, u := range urls {
+				variants = append(variants, MediaVariant{
+					URL:        u,
+					Definition: "1080p",
+					Quality:    1080,
+					Encrypted:  false,
+				})
+			}
+			return PlaybackInfo{
+				SeriesID: seriesID,
+				VideoID:  videoID,
+				Duration: duration,
+				Selected: variants[0],
+				Variants: variants,
+			}, nil
+		}
+	}
+
+	// 3. Fallback: check if official web public preview MP4 is accessible (free episodes)
+	publicURL := fmt.Sprintf("%s/video/public/%s/360p.mp4", WebBaseURL, url.PathEscape(videoID))
+	req, headErr := http.NewRequestWithContext(ctx, http.MethodHead, publicURL, nil)
+	if headErr == nil {
+		req.Header.Set("User-Agent", WebUserAgent)
+		req.Header.Set("Referer", WebBaseURL+"/")
+		if resp, err := c.httpClient.Do(req); err == nil {
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusPartialContent {
+				variant := MediaVariant{
+					URL:        publicURL,
+					Definition: "360p",
+					Quality:    360,
+					Codec:      "h264",
+					Encrypted:  false,
+				}
+				return PlaybackInfo{
+					SeriesID: seriesID,
+					VideoID:  videoID,
+					Selected: variant,
+					Variants: []MediaVariant{variant},
+				}, nil
+			}
+		}
+	}
+
+	return PlaybackInfo{}, errors.New("网页该集未提供播放地址")
 }
 
 func (c *Client) resolveBackupMedia(ctx context.Context, seriesID, videoID string) (PlaybackInfo, error) {

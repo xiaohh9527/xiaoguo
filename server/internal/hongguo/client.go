@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -152,9 +153,12 @@ func NewClient() *Client {
 		ForceAttemptHTTP2:   true,
 	}
 
+	jar, _ := cookiejar.New(nil)
+
 	return &Client{
 		httpClient: &http.Client{
 			Transport: transport,
+			Jar:       jar,
 			Timeout:   35 * time.Second,
 		},
 		device:       loadDeviceProfile(),
@@ -276,6 +280,14 @@ func (c *Client) AppRequest(ctx context.Context, method, path string, extra url.
 		if resp.StatusCode != http.StatusOK {
 			lastErr = fmt.Errorf("红果 App 接口 HTTP %d", resp.StatusCode)
 			if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+				return nil, lastErr
+			}
+			continue
+		}
+
+		if len(respBody) == 0 {
+			lastErr = errors.New("红果 App 接口返回空内容")
+			if attempt >= 1 {
 				return nil, lastErr
 			}
 			continue
