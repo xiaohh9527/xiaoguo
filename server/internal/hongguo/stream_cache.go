@@ -43,6 +43,22 @@ func isHEIC(data []byte) bool {
 	return false
 }
 
+func isFileCENCEncrypted(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+
+	buf := make([]byte, 8192)
+	n, err := f.Read(buf)
+	if err != nil && err != io.EOF {
+		return false
+	}
+	header := buf[:n]
+	return bytes.Contains(header, []byte("encv")) || bytes.Contains(header, []byte("enca")) || bytes.Contains(header, []byte("sinf"))
+}
+
 func NewStreamManager(cacheDir string, client *Client) *StreamManager {
 	if cacheDir == "" {
 		cacheDir = filepath.Join(os.TempDir(), "hongguo_video_cache")
@@ -84,24 +100,35 @@ func NewStreamManager(cacheDir string, client *Client) *StreamManager {
 
 func (sm *StreamManager) cleanHEICCache() {
 	dir := filepath.Join(sm.cacheDir, "images")
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return
+	if entries, err := os.ReadDir(dir); err == nil {
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			path := filepath.Join(dir, e.Name())
+			f, err := os.Open(path)
+			if err != nil {
+				continue
+			}
+			hdr := make([]byte, 16)
+			n, _ := f.Read(hdr)
+			f.Close()
+			if isHEIC(hdr[:n]) {
+				_ = os.Remove(path)
+			}
+		}
 	}
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		path := filepath.Join(dir, e.Name())
-		f, err := os.Open(path)
-		if err != nil {
-			continue
-		}
-		hdr := make([]byte, 16)
-		n, _ := f.Read(hdr)
-		f.Close()
-		if isHEIC(hdr[:n]) {
-			_ = os.Remove(path)
+
+	// Clean stale/corrupted encrypted video caches on startup
+	videoDir := filepath.Join(sm.cacheDir, "videos")
+	if entries, err := os.ReadDir(videoDir); err == nil {
+		for _, e := range entries {
+			if !e.IsDir() && strings.HasSuffix(e.Name(), ".mp4") {
+				vPath := filepath.Join(videoDir, e.Name())
+				if isFileCENCEncrypted(vPath) {
+					_ = os.Remove(vPath)
+				}
+			}
 		}
 	}
 }
@@ -116,7 +143,11 @@ func (sm *StreamManager) GetDecryptedVideo(ctx context.Context, seriesID, videoI
 
 	// Check if already cached and valid
 	if fi, err := os.Stat(cacheFilePath); err == nil && fi.Size() > 1024 {
-		return cacheFilePath, nil
+		if !isFileCENCEncrypted(cacheFilePath) {
+			return cacheFilePath, nil
+		}
+		// Stale encrypted cache detected, remove it so it can be re-decrypted properly
+		_ = os.Remove(cacheFilePath)
 	}
 
 	jobKey := cacheFileName
@@ -180,23 +211,28 @@ func (sm *StreamManager) GetDecryptedVideo(ctx context.Context, seriesID, videoI
 		}
 	}
 
-	var finalBytes []byte
-	if variant.Encrypted && variant.CENCKeyHex != "" {
-		key, err := hex.DecodeString(variant.CENCKeyHex)
-		if err != nil || len(key) != 16 {
-			job.err = errors.New("无效解密密钥")
-			return "", job.err
-		}
+		var finalBytes []byte
+		if variant.Encrypted && variant.CENCKeyHex != "" {
+			key, err := hex.DecodeString(variant.CENCKeyHex)
+			if err != nil || len(key) != 16 {
+				job.err = errors.New("无效解密密钥")
+				return "", job.err
+			}
 
-		decrypted, err := DecryptCENCMP4(rawBytes, key)
-		if err != nil {
-			job.err = fmt.Errorf("解密失败: %w", err)
-			return "", job.err
+			decrypted, err := DecryptCENCMP4(rawBytes, key)
+			if err != nil {
+				job.err = fmt.Errorf("解密失败: %w", err)
+				return "", job.err
+			}
+			finalBytes = decrypted
+		} else {
+			headerSample := rawBytes[:min(len(rawBytes), 8192)]
+			if bytes.Contains(headerSample, []byte("encv")) || bytes.Contains(headerSample, []byte("sinf")) {
+				job.err = errors.New("视频流受 CENC 加密保护且缺少解密密钥")
+				return "", job.err
+			}
+			finalBytes = rawBytes
 		}
-		finalBytes = decrypted
-	} else {
-		finalBytes = rawBytes
-	}
 
 	tempPath := cacheFilePath + ".tmp"
 	if err := os.WriteFile(tempPath, finalBytes, 0644); err != nil {
