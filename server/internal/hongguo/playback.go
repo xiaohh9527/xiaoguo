@@ -5,12 +5,15 @@ import (
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/md5"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"math/bits"
 	"net/http"
 	"net/url"
@@ -21,6 +24,15 @@ import (
 )
 
 const backupPlaybackAPI = "https://djapi.999888456.xyz/api/hongguo/play"
+
+var playHosts = []string{
+	"https://api5-normal-lq.fqnovel.com",
+	"https://api5-normal-hl.fqnovel.com",
+	"https://api5-normal-lf.fqnovel.com",
+	"https://api.fqnovel.com",
+	"https://api3-normal-lq.fqnovel.com",
+	"https://api3-normal-hl.fqnovel.com",
+}
 
 func (c *Client) ResolvePlayback(ctx context.Context, seriesID, videoID string) (PlaybackInfo, error) {
 	seriesID = strings.TrimPrefix(strings.TrimSpace(seriesID), "hongguo:")
@@ -166,141 +178,253 @@ func parseRawVariants(model map[string]any) []map[string]any {
 }
 
 func (c *Client) resolveAppMedia(ctx context.Context, seriesID, videoID string) (PlaybackInfo, error) {
-	payload := map[string]any{
-		"mixed_video_id_map": map[string]any{
-			"1004": []string{videoID},
-		},
-		"video_id": videoID,
-		"biz_param": map[string]any{
-			"video_platform":            1024,
-			"need_all_video_definition": true,
-		},
+	c.mu.Lock()
+	dev := c.device
+	c.mu.Unlock()
+
+	devID := dev.DeviceID
+	iid := dev.InstallID
+	cdid := dev.CDID
+	openudid := dev.OpenUDID
+	if devID == "" || devID == "797614684305320" {
+		devID = "3190157066913784"
+		iid = "3190157066917880"
+		cdid = "2766eb71-cfb9-459c-ad65-f18992710f81"
+		openudid = "39e48263544334b9"
 	}
 
-	result, err := c.AppRequest(ctx, http.MethodPost, "/novel/player/multi_video_model/v1/", nil, payload, false)
-	if err != nil {
-		return PlaybackInfo{}, err
+	bizParam := map[string]any{
+		"detail_page_version":       0,
+		"device_level":              4,
+		"disable_digg_stat":         false,
+		"need_all_video_definition": true,
+		"need_mp4_align":            false,
+		"use_os_player":             false,
+		"use_server_dns":            false,
+		"video_platform":            1024,
 	}
 
-	model := parseVideoModelMap(result, videoID)
-	rawVariants := parseRawVariants(model)
+	contentTypes := []string{"1004", "1001"}
+	var lastErr error
 
-	// Check if any variant uses bytevc2 (which causes black screen / no video on third-party players)
-	hasByteVC2 := false
-	for _, v := range rawVariants {
-		meta := nestedMap(v, "video_meta")
-		codec := strings.ToLower(firstNonEmpty(mapString(meta, "codec_type"), mapString(v, "codec_type")))
-		if codec == "bytevc2" {
-			hasByteVC2 = true
-			break
+	for _, ct := range contentTypes {
+		payload := map[string]any{
+			"biz_param": bizParam,
+			"mixed_video_id_map": map[string]any{
+				ct: []string{videoID},
+			},
 		}
-	}
-
-	// If bytevc2 is present, fetch fallback compatible streams without update_version_code to get standard bytevc1 (H.265/HEVC)
-	if hasByteVC2 {
-		compatResult, compatErr := c.AppRequest(ctx, http.MethodPost, "/novel/player/multi_video_model/v1/", url.Values{"update_version_code": {""}}, payload, false)
-		if compatErr == nil {
-			compatModel := parseVideoModelMap(compatResult, videoID)
-			compatVariants := parseRawVariants(compatModel)
-			rawVariants = append(rawVariants, compatVariants...)
-		}
-	}
-
-	if len(rawVariants) == 0 {
-		return PlaybackInfo{}, errors.New("无可用视频流")
-	}
-
-	duration, _ := strconv.ParseFloat(mapString(model, "video_duration", "duration"), 64)
-	var variants []MediaVariant
-
-	for _, v := range rawVariants {
-		meta := nestedMap(v, "video_meta")
-		codec := strings.ToLower(firstNonEmpty(mapString(meta, "codec_type"), mapString(v, "codec_type")))
-		if codec == "bytevc2" {
-			// Strictly skip bytevc2 as third-party players (TVBox/IJK/ExoPlayer/VLC) cannot decode its video track
-			continue
+		body, err := json.Marshal(payload)
+		if err != nil {
+			return PlaybackInfo{}, err
 		}
 
-		urls := extractMediaURLs(v)
-		if len(urls) == 0 {
-			continue
-		}
+		now := time.Now()
+		rnd, _ := rand.Int(rand.Reader, big.NewInt(0x35a4e900))
+		reqID := fmt.Sprintf("%d-%d", now.UnixMilli(), rnd.Int64()+0x5f5e100)
 
-		enc := nestedMap(v, "encrypt_info")
-		spade := firstNonEmpty(mapString(enc, "spade_a"), mapString(v, "spade_a"))
-		isEnc := spade != "" || enc["encrypt"] == true || v["encrypt"] == true || mapString(v, "encryption_method") == "cenc-aes-ctr"
-
-		var keyHex string
-		if spade != "" {
-			k, err := DecodeHongguoContentKey(spade)
-			if err == nil && len(k) == 16 {
-				keyHex = hex.EncodeToString(k)
+		query := url.Values{
+			"aid":                       {"8662"},
+			"app_name":                  {"novelread"},
+			"version_code":              {"73932"},
+			"version_name":              {"7.3.9.32"},
+			"manifest_version_code":     {"73932"},
+			"update_version_code":       {"73932"},
+			"channel":                   {dev.Channel},
+			"device_platform":           {"android"},
+			"os":                        {"android"},
+			"ssmix":                     {"a"},
+			"device_type":               {dev.DeviceType},
+			"device_brand":              {dev.DeviceBrand},
+			"language":                  {"zh"},
+			"os_api":                    {"25"},
+			"os_version":                {"7.1.2"},
+			"resolution":                {dev.Resolution},
+			"dpi":                       {dev.DPI},
+			"ac":                        {"wifi"},
+			"host_abi":                  {"arm64-v8a"},
+			"dragon_device_type":        {"phone"},
+			"compliance_status":         {"0"},
+			"need_personal_recommend":   {"1"},
+			"player_so_load":            {"1"},
+			"is_android_pad_screen":     {"0"},
+			"pv_player":                 {"1"},
+			"passport-sdk-version":      {"50514"},
+			"use_new_token_expire_rule": {"1"},
+			"cronet_version":            {"8d40f833_2026-03-03"},
+				"ttnet_version":             {"4.2.243.31-douyin"},
+				"use_store_region_cookie":   {"1"},
+				"device_id":                 {devID},
+				"iid":                       {iid},
+				"cdid":                      {cdid},
+				"openudid":                  {openudid},
+				"_rticket":                  {strconv.FormatInt(now.UnixMilli(), 10)},
 			}
-		}
 
-		def := firstNonEmpty(mapString(meta, "definition"), mapString(v, "definition"))
-		height, _ := strconv.Atoi(firstNonEmpty(mapString(meta, "vheight"), mapString(v, "vheight")))
-		width, _ := strconv.Atoi(firstNonEmpty(mapString(meta, "vwidth"), mapString(v, "vwidth")))
-		sz, _ := strconv.ParseInt(firstNonEmpty(mapString(meta, "size"), mapString(v, "size")), 10, 64)
+			h := md5.Sum(body)
+			stub := strings.ToUpper(hex.EncodeToString(h[:]))
 
-		quality := height
-		if q, err := strconv.Atoi(qualityNumber.FindString(def)); err == nil && q > 0 {
-			quality = q
-		}
-		if quality == 0 {
-			quality = 720
-		}
+			for _, baseURL := range playHosts {
+				fullURL := fmt.Sprintf("%s/novel/player/multi_video_model/v1/?%s", baseURL, query.Encode())
+				req, err := http.NewRequestWithContext(ctx, http.MethodPost, fullURL, bytes.NewReader(body))
+				if err != nil {
+					lastErr = err
+					continue
+				}
 
-		for _, u := range urls {
-			variants = append(variants, MediaVariant{
-				URL:        u,
-				Codec:      codec,
-				Definition: def,
-				Quality:    quality,
-				Width:      width,
-				Height:     height,
-				Size:       sz,
-				Encrypted:  isEnc,
-				CENCKeyHex: keyHex,
+				req.Header.Set("User-Agent", "com.phoenix.read/73932 (Linux; U; Android 11; zh_CN; M2012K11AC; Build/RKQ1.200826.002; Cronet/TTNetVersion:8d40f833 2026-03-03 QuicVersion:21ac1950 2025-11-18)")
+				req.Header.Set("Accept", "application/json; charset=utf-8,application/x-protobuf")
+				req.Header.Set("Content-Type", "application/json; charset=utf-8")
+				req.Header.Set("X-XS-From-Web", "0")
+				req.Header.Set("X-VC-Bdturing-Sdk-Version", "4.0.3.cn")
+				req.Header.Set("Sdk-Version", "2")
+				req.Header.Set("Passport-Sdk-Version", "50514")
+				req.Header.Set("X-TT-Store-Region", "cn-gd")
+				req.Header.Set("X-TT-Store-Region-Src", "did")
+				req.Header.Set("X-SS-DP", "8662")
+				req.Header.Set("X-Reading-Request-Id", reqID)
+				req.Header.Set("X-SS-Req-Ticket", strconv.FormatInt(now.UnixMilli(), 10))
+				req.Header.Set("X-SS-STUB", stub)
+				req.Header.Set("Cookie", fmt.Sprintf("install_id=%s; store-region=cn-hk; store-region-src=did", iid))
+
+			resp, err := c.httpClient.Do(req)
+			if err != nil {
+				lastErr = err
+				continue
+			}
+
+			respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
+			resp.Body.Close()
+			if readErr != nil {
+				lastErr = readErr
+				continue
+			}
+
+			if resp.StatusCode != http.StatusOK || len(respBody) == 0 {
+				lastErr = fmt.Errorf("HTTP %d, len %d", resp.StatusCode, len(respBody))
+				continue
+			}
+
+			var result struct {
+				Code int `json:"code"`
+				Data map[string]struct {
+					VideoModel string `json:"video_model"`
+				} `json:"data"`
+			}
+			if err := json.Unmarshal(respBody, &result); err != nil {
+				lastErr = err
+				continue
+			}
+
+			item, ok := result.Data[videoID]
+			if !ok || item.VideoModel == "" {
+				lastErr = fmt.Errorf("未找到分集 %s 播放模型", videoID)
+				continue
+			}
+
+			var model struct {
+				VideoDuration float64 `json:"video_duration"`
+				VideoList     []struct {
+					MainURL   string `json:"main_url"`
+					BackupURL string `json:"backup_url_1"`
+					SpadeA    string `json:"spade_a"`
+					VideoMeta struct {
+						Definition string `json:"definition"`
+						Quality    string `json:"quality"`
+						CodecType  string `json:"codec_type"`
+						VHeight    int    `json:"vheight"`
+						VWidth     int    `json:"vwidth"`
+						Size       int64  `json:"size"`
+					} `json:"video_meta"`
+				} `json:"video_list"`
+			}
+			if err := json.Unmarshal([]byte(item.VideoModel), &model); err != nil {
+				lastErr = err
+				continue
+			}
+
+			var variants []MediaVariant
+			for _, v := range model.VideoList {
+				codec := strings.ToLower(v.VideoMeta.CodecType)
+				if codec == "bytevc2" {
+					continue // 跳过第三方播放器无法解码画面黑屏的 bytevc2
+				}
+				u := strings.TrimSpace(v.MainURL)
+				if u == "" {
+					u = strings.TrimSpace(v.BackupURL)
+				}
+				if u == "" {
+					continue
+				}
+
+				var keyHex string
+				isEnc := v.SpadeA != ""
+				if isEnc {
+					k, err := DecodeHongguoContentKey(v.SpadeA)
+					if err == nil && len(k) == 16 {
+						keyHex = hex.EncodeToString(k)
+					}
+				}
+
+				def := v.VideoMeta.Definition
+				height := v.VideoMeta.VHeight
+				width := v.VideoMeta.VWidth
+				quality := height
+				if strings.Contains(def, "1080") {
+					quality = 1080
+				} else if strings.Contains(def, "720") {
+					quality = 720
+				} else if strings.Contains(def, "540") {
+					quality = 540
+				} else if strings.Contains(def, "480") {
+					quality = 480
+				} else if strings.Contains(def, "360") {
+					quality = 360
+				}
+				if quality == 0 {
+					quality = 720
+				}
+
+				variants = append(variants, MediaVariant{
+					URL:        u,
+					Codec:      codec,
+					Definition: def,
+					Quality:    quality,
+					Width:      width,
+					Height:     height,
+					Size:       v.VideoMeta.Size,
+					Encrypted:  isEnc,
+					CENCKeyHex: keyHex,
+				})
+			}
+
+			if len(variants) == 0 {
+				lastErr = fmt.Errorf("分集 %s 无可用兼容编码视频流", videoID)
+				continue
+			}
+
+			// Sort by quality descending: 1080p > 720p > 540p > 480p > 360p
+			sort.SliceStable(variants, func(i, j int) bool {
+				if variants[i].Quality != variants[j].Quality {
+					return variants[i].Quality > variants[j].Quality
+				}
+				if variants[i].Codec == "h264" && variants[j].Codec != "h264" {
+					return true
+				}
+				return false
 			})
+
+			return PlaybackInfo{
+				SeriesID: seriesID,
+				VideoID:  videoID,
+				Duration: model.VideoDuration,
+				Selected: variants[0],
+				Variants: variants,
+			}, nil
 		}
 	}
 
-	if len(variants) == 0 {
-		return PlaybackInfo{}, errors.New("无兼容的视频编码")
-	}
-
-	// Sort by quality descending, with codec preference: h264 > bytevc1 > bytevc2
-	sort.SliceStable(variants, func(i, j int) bool {
-		codecScore := func(c string) int {
-			switch c {
-			case "h264", "avc1":
-				return 3
-			case "bytevc1", "hevc", "h265":
-				return 2
-			case "bytevc2":
-				return 1
-			default:
-				return 0
-			}
-		}
-		if variants[i].Quality != variants[j].Quality {
-			return variants[i].Quality > variants[j].Quality
-		}
-		sI, sJ := codecScore(variants[i].Codec), codecScore(variants[j].Codec)
-		if sI != sJ {
-			return sI > sJ
-		}
-		return false
-	})
-
-	return PlaybackInfo{
-		SeriesID: seriesID,
-		VideoID:  videoID,
-		Duration: duration,
-		Selected: variants[0],
-		Variants: variants,
-	}, nil
+	return PlaybackInfo{}, lastErr
 }
 
 func (c *Client) fetchWebProtectedFallbackPlayInfo(ctx context.Context, seriesID, videoID string) (PlaybackInfo, error) {
@@ -315,78 +439,97 @@ func (c *Client) fetchWebProtectedFallbackPlayInfo(ctx context.Context, seriesID
 	}
 
 	apiURL := WebBaseURL + "/api/video/protected/fallback-play-info?aid=8662"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(body))
-	if err != nil {
-		return PlaybackInfo{}, err
-	}
-	req.Header.Set("User-Agent", WebUserAgent)
-	req.Header.Set("Referer", WebBaseURL+"/")
-	req.Header.Set("Origin", WebBaseURL)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json, text/plain, */*")
-	req.Header.Set("Sec-Fetch-Dest", "empty")
-	req.Header.Set("Sec-Fetch-Mode", "cors")
-	req.Header.Set("Sec-Fetch-Site", "same-origin")
 
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return PlaybackInfo{}, err
-	}
-	defer resp.Body.Close()
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-time.After(time.Duration(attempt) * 250 * time.Millisecond):
+			case <-ctx.Done():
+				return PlaybackInfo{}, ctx.Err()
+			}
+		}
 
-	if resp.StatusCode != http.StatusOK {
-		return PlaybackInfo{}, fmt.Errorf("HTTP %d", resp.StatusCode)
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(body))
+		if err != nil {
+			return PlaybackInfo{}, err
+		}
+		req.Header.Set("User-Agent", WebUserAgent)
+		req.Header.Set("Referer", WebBaseURL+"/")
+		req.Header.Set("Origin", WebBaseURL)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json, text/plain, */*")
+		req.Header.Set("Sec-Fetch-Dest", "empty")
+		req.Header.Set("Sec-Fetch-Mode", "cors")
+		req.Header.Set("Sec-Fetch-Site", "same-origin")
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		resp.Body.Close()
+		if readErr != nil {
+			lastErr = readErr
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			lastErr = fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(respBody))
+			continue
+		}
+
+		var res struct {
+			MainURL   string `json:"main_url"`
+			URLExpire int64  `json:"url_expire"`
+			BaseResp  struct {
+				StatusCode    int    `json:"StatusCode"`
+				StatusMessage string `json:"StatusMessage"`
+			} `json:"base_resp"`
+		}
+		if err := json.Unmarshal(respBody, &res); err != nil {
+			lastErr = err
+			continue
+		}
+
+		mainURL := strings.TrimSpace(res.MainURL)
+		if res.BaseResp.StatusCode != 0 || mainURL == "" {
+			lastErr = fmt.Errorf("fallback-play-info code %d: %s", res.BaseResp.StatusCode, res.BaseResp.StatusMessage)
+			continue
+		}
+
+		// Provide standard quality definition lines (1080p, 720p, 540p, 480p) pointing to this high-quality unencrypted stream
+		qualities := []struct {
+			def string
+			q   int
+		}{
+			{"1080p", 1080},
+			{"720p", 720},
+			{"540p", 540},
+			{"480p", 480},
+		}
+		var variants []MediaVariant
+		for _, item := range qualities {
+			variants = append(variants, MediaVariant{
+				URL:        mainURL,
+				Definition: item.def,
+				Quality:    item.q,
+				Codec:      "h264",
+				Encrypted:  false,
+			})
+		}
+
+		return PlaybackInfo{
+			SeriesID: seriesID,
+			VideoID:  videoID,
+			Selected: variants[0],
+			Variants: variants,
+		}, nil
 	}
 
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return PlaybackInfo{}, err
-	}
-
-	var res struct {
-		MainURL   string `json:"main_url"`
-		URLExpire int64  `json:"url_expire"`
-		BaseResp  struct {
-			StatusCode    int    `json:"StatusCode"`
-			StatusMessage string `json:"StatusMessage"`
-		} `json:"base_resp"`
-	}
-	if err := json.Unmarshal(respBody, &res); err != nil {
-		return PlaybackInfo{}, err
-	}
-
-	mainURL := strings.TrimSpace(res.MainURL)
-	if res.BaseResp.StatusCode != 0 || mainURL == "" {
-		return PlaybackInfo{}, fmt.Errorf("fallback-play-info code %d: %s", res.BaseResp.StatusCode, res.BaseResp.StatusMessage)
-	}
-
-	// Provide standard quality definition lines (1080p, 720p, 540p, 480p) pointing to this high-quality unencrypted stream
-	qualities := []struct {
-		def string
-		q   int
-	}{
-		{"1080p", 1080},
-		{"720p", 720},
-		{"540p", 540},
-		{"480p", 480},
-	}
-	var variants []MediaVariant
-	for _, item := range qualities {
-		variants = append(variants, MediaVariant{
-			URL:        mainURL,
-			Definition: item.def,
-			Quality:    item.q,
-			Codec:      "h264",
-			Encrypted:  false,
-		})
-	}
-
-	return PlaybackInfo{
-		SeriesID: seriesID,
-		VideoID:  videoID,
-		Selected: variants[0],
-		Variants: variants,
-	}, nil
+	return PlaybackInfo{}, lastErr
 }
 
 func (c *Client) resolveWebMedia(ctx context.Context, seriesID, videoID string) (PlaybackInfo, error) {

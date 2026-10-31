@@ -98,16 +98,49 @@ func TestDetailAndMultipleEpisodesPlayback(t *testing.T) {
 		testIndices = append(testIndices, 9)
 	}
 
-	for _, idx := range testIndices {
+		for _, idx := range testIndices {
+			ch := chapters[idx]
+			t.Logf("Resolving chapter [%d]: Title=%s, VideoID=%s", idx+1, ch.Title, ch.VideoID)
+			info, err := client.ResolvePlayback(ctx, seriesID, ch.VideoID)
+			if err != nil {
+				t.Fatalf("ResolvePlayback failed for chapter %d (%s): %v", idx+1, ch.VideoID, err)
+			}
+			if len(info.Variants) == 0 {
+				t.Fatalf("No variants for chapter %d (%s)", idx+1, ch.VideoID)
+			}
+			t.Logf("Chapter [%d] resolved successfully: %d variants, Best Quality=%s", idx+1, len(info.Variants), info.Selected.Definition)
+		}
+	}
+
+func TestFullSeriesNonFreeEpisodesPlayback(t *testing.T) {
+	client := hongguo.NewClient()
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	defer cancel()
+
+	seriesID := "7692043430955863102" // 反向拿捏 (126集)
+	detail, chapters, err := client.FetchDetail(ctx, seriesID)
+	if err != nil {
+		t.Fatalf("FetchDetail failed: %v", err)
+	}
+
+	t.Logf("Testing drama: %s (%d episodes)", detail.Title, len(chapters))
+
+	// Test episode 1 (free), episode 4 (first non-free), and episode 10
+	testIdxs := []int{0, 3, 9}
+	for _, idx := range testIdxs {
+		if idx >= len(chapters) {
+			continue
+		}
 		ch := chapters[idx]
-		t.Logf("Resolving chapter [%d]: Title=%s, VideoID=%s", idx+1, ch.Title, ch.VideoID)
 		info, err := client.ResolvePlayback(ctx, seriesID, ch.VideoID)
 		if err != nil {
-			t.Fatalf("ResolvePlayback failed for chapter %d (%s): %v", idx+1, ch.VideoID, err)
+			t.Fatalf("Episode %d failed: %v", idx+1, err)
 		}
 		if len(info.Variants) == 0 {
-			t.Fatalf("No variants for chapter %d (%s)", idx+1, ch.VideoID)
+			t.Fatalf("Episode %d has 0 variants", idx+1)
 		}
-		t.Logf("Chapter [%d] resolved successfully: %d variants, Best Quality=%s", idx+1, len(info.Variants), info.Selected.Definition)
+		t.Logf("Episode %d (%s): Selected=%s (%dp, codec=%s), variants=%d, URL=%s...",
+			idx+1, ch.VideoID, info.Selected.Definition, info.Selected.Quality, info.Selected.Codec, len(info.Variants), info.Selected.URL[:40])
 	}
 }
+

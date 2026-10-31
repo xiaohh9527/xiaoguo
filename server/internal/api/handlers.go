@@ -128,6 +128,7 @@ func (s *Server) HandleDetail(w http.ResponseWriter, r *http.Request) {
 	// 异步静默预热第 1 集（用户进入详情页停留选集时后台预热，点击即秒开）
 	if len(chapters) > 0 {
 		go func(dramaID, firstVideoID string) {
+			time.Sleep(600 * time.Millisecond) // 错峰避免与详情页请求并发
 			bgCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 			defer cancel()
 			if playInfo, err := s.client.ResolvePlayback(bgCtx, dramaID, firstVideoID); err == nil {
@@ -283,6 +284,7 @@ func (s *Server) HandleStream(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) prefetchNextEpisode(seriesID, currentVideoID string, quality int) {
+	time.Sleep(1 * time.Second) // 错峰等待当前主视频起播稳定后再发起下一集预热，避免触发网关频控
 	bgCtx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 

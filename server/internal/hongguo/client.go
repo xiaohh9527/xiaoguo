@@ -3,6 +3,7 @@ package hongguo
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -48,15 +49,15 @@ type DeviceProfile struct {
 
 func defaultDeviceProfile() DeviceProfile {
 	return DeviceProfile{
-		DeviceID:    "797614684305320",
-		InstallID:   "797614683457464",
-		CDID:        "f222479a-ffa6-4262-bab8-279d9f701ee8",
-		OpenUDID:    "892bdf31d465060d",
-		DeviceToken: "AAARG6S7APMJXJ3HIBZZGM3YMBLRS2TOFDNYTTHYSS7WQXDM4MPDYOJQYRS3M3YVHVE3NEQD3CAQBHF47A22CD5A4RGK72QM2VRDETBDGDUD4ZOPEWIUAVV23AEYA",
-		TTReq:       "1$df51b637fb4664e066427b792fa89b0ee9ae9eac",
+		DeviceID:    "3190157066913784",
+		InstallID:   "3190157066917880",
+		CDID:        "2766eb71-cfb9-459c-ad65-f18992710f81",
+		OpenUDID:    "39e48263544334b9",
+		DeviceToken: "AAA34LSTPJCHN37ZUR6CKGZTEC4IVTBFXCPJPZ7DAV57ZIRXC6NLV364U6YHQPQNDD34WESPQZCGGWUYPAO7HQZPKSGU3P4M5BSGLZHXY6NAIFURTPROB47LK6LR4",
+		TTReq:       "1$3a7d9a34dc7d473a93c32e0c9145ab3589b23d25",
 		DeviceBrand: "xiaomi",
 		DeviceType:  "23127PN0CC",
-		OSVersion:   "7.1.2",
+		OSVersion:   "14",
 		OSAPI:       "25",
 		Resolution:  "1200*2670",
 		DPI:         "460",
@@ -80,7 +81,7 @@ func loadDeviceProfile() DeviceProfile {
 	for _, p := range candidates {
 		if data, err := os.ReadFile(p); err == nil && len(data) > 0 {
 			var loaded DeviceProfile
-			if err := json.Unmarshal(data, &loaded); err == nil && loaded.DeviceID != "" {
+			if err := json.Unmarshal(data, &loaded); err == nil && loaded.DeviceID != "" && loaded.DeviceID != "797614684305320" {
 				if loaded.CDID != "" {
 					dev.CDID = loaded.CDID
 				}
@@ -150,7 +151,8 @@ func NewClient() *Client {
 		MaxIdleConnsPerHost: 40,
 		IdleConnTimeout:     120 * time.Second,
 		DisableCompression:  false,
-		ForceAttemptHTTP2:   true,
+		ForceAttemptHTTP2:   false,
+		TLSNextProto:        make(map[string]func(authority string, c *tls.Conn) http.RoundTripper),
 	}
 
 	jar, _ := cookiejar.New(nil)
@@ -249,62 +251,62 @@ func (c *Client) AppRequest(ctx context.Context, method, path string, extra url.
 			req.Header.Set("Comment-Source", "601")
 			req.Header.Set("Server-Channel", "1000")
 			signHongguoCommentRequest(req, nonce, now)
-		} else if strings.Contains(path, "video_detail") {
-			nonce, nonceErr := newHongguoCommentNonce()
-			if nonceErr == nil {
-				req.Header.Set("Comment-Source", "601")
-				req.Header.Set("Server-Channel", "1000")
-				signHongguoCommentRequest(req, nonce, now)
+			} else if strings.Contains(path, "video_detail") {
+				nonce, nonceErr := newHongguoCommentNonce()
+				if nonceErr == nil {
+					req.Header.Set("Comment-Source", "601")
+					req.Header.Set("Server-Channel", "1000")
+					signHongguoCommentRequest(req, nonce, now)
+				}
+			} else if attempt == 0 {
+				signHongguoRequest(req, body, now)
 			}
-		} else if !strings.Contains(path, "video_model") && attempt == 0 {
-			signHongguoRequest(req, body, now)
-		}
 
-		if payload != nil {
-			req.Header.Set("Content-Type", "application/json; charset=utf-8")
-		}
-
-		resp, err := c.httpClient.Do(req)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-
-		respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
-		resp.Body.Close()
-		if readErr != nil {
-			lastErr = readErr
-			continue
-		}
-
-		if resp.StatusCode != http.StatusOK {
-			lastErr = fmt.Errorf("红果 App 接口 HTTP %d", resp.StatusCode)
-			if resp.StatusCode >= 400 && resp.StatusCode < 500 {
-				return nil, lastErr
+			if payload != nil {
+				req.Header.Set("Content-Type", "application/json; charset=utf-8")
 			}
-			continue
-		}
 
-		if len(respBody) == 0 {
-			lastErr = errors.New("红果 App 接口返回空内容")
-			if attempt >= 1 {
-				return nil, lastErr
+			resp, err := c.httpClient.Do(req)
+			if err != nil {
+				lastErr = err
+				continue
 			}
-			continue
-		}
 
-		var result map[string]any
-		dec := json.NewDecoder(bytes.NewReader(respBody))
-		dec.UseNumber()
-		if err := dec.Decode(&result); err != nil {
-			lastErr = errors.New("红果 App 接口返回格式异常")
-			continue
-		}
+			respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
+			resp.Body.Close()
+			if readErr != nil {
+				lastErr = readErr
+				continue
+			}
 
-		code := firstNonEmpty(mapString(result, "code", "Code", "status_code"), mapString(nestedMap(result, "BaseResp"), "StatusCode"))
-		if code != "" && code != "0" {
-			return nil, fmt.Errorf("红果接口提示: %s", code)
-		}
+			if resp.StatusCode != http.StatusOK {
+				lastErr = fmt.Errorf("红果 App 接口 HTTP %d", resp.StatusCode)
+				if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+					return nil, lastErr
+				}
+				continue
+			}
+
+			if len(respBody) == 0 {
+				lastErr = errors.New("红果 App 接口返回空内容")
+				if attempt >= 1 {
+					return nil, lastErr
+				}
+				continue
+			}
+
+			var result map[string]any
+			dec := json.NewDecoder(bytes.NewReader(respBody))
+			dec.UseNumber()
+			if err := dec.Decode(&result); err != nil {
+				lastErr = errors.New("红果 App 接口返回格式异常")
+				continue
+			}
+
+			code := firstNonEmpty(mapString(result, "code", "Code", "status_code"), mapString(nestedMap(result, "BaseResp"), "StatusCode"))
+			if code != "" && code != "0" {
+				return nil, fmt.Errorf("红果接口提示: %s", code)
+			}
 
 		return result, nil
 	}
