@@ -325,9 +325,16 @@ func (c *Client) resolveAppMedia(ctx context.Context, seriesID, videoID string) 
 			var model struct {
 				VideoDuration float64 `json:"video_duration"`
 				VideoList     []struct {
-					MainURL   string `json:"main_url"`
-					BackupURL string `json:"backup_url_1"`
-					SpadeA    string `json:"spade_a"`
+					MainURL     string `json:"main_url"`
+					BackupURL   string `json:"backup_url_1"`
+					BackupURL2  string `json:"backup_url"`
+					SpadeA      string `json:"spade_a"`
+					EncryptInfo struct {
+						Encrypt bool   `json:"encrypt"`
+						Method  string `json:"encryption_method"`
+						KID     string `json:"kid"`
+						SpadeA  string `json:"spade_a"`
+					} `json:"encrypt_info"`
 					VideoMeta struct {
 						Definition string `json:"definition"`
 						Quality    string `json:"quality"`
@@ -354,15 +361,24 @@ func (c *Client) resolveAppMedia(ctx context.Context, seriesID, videoID string) 
 					u = strings.TrimSpace(v.BackupURL)
 				}
 				if u == "" {
+					u = strings.TrimSpace(v.BackupURL2)
+				}
+				if u == "" {
 					continue
 				}
 
+				spadeA := strings.TrimSpace(v.EncryptInfo.SpadeA)
+				if spadeA == "" {
+					spadeA = strings.TrimSpace(v.SpadeA)
+				}
+
 				var keyHex string
-				isEnc := v.SpadeA != ""
-				if isEnc {
-					k, err := DecodeHongguoContentKey(v.SpadeA)
+				isEnc := spadeA != "" || v.EncryptInfo.Encrypt || v.EncryptInfo.Method == "cenc-aes-ctr"
+				if spadeA != "" {
+					k, err := DecodeHongguoContentKey(spadeA)
 					if err == nil && len(k) == 16 {
 						keyHex = hex.EncodeToString(k)
+						isEnc = true
 					}
 				}
 
