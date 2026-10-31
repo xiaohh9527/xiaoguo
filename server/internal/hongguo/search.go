@@ -38,10 +38,6 @@ func (c *Client) Search(ctx context.Context, keyword string) (SearchEntry, error
 	// 1. Fetch suggestions names
 	names, _ := c.fetchSearchNames(ctx, keyword)
 
-	// 2. Fetch search page from web
-	pageURL := fmt.Sprintf("%s/search/%s", WebBaseURL, url.PathEscape(keyword))
-	body, err := c.FetchWebText(ctx, pageURL, WebBaseURL+"/")
-
 	var dramas []Drama
 	seenID := make(map[string]int)
 	seenTitle := make(map[string]int)
@@ -69,24 +65,47 @@ func (c *Client) Search(ctx context.Context, keyword string) (SearchEntry, error
 	}
 
 	total := 0
-	// First add official web search page results (richer metadata: tags, desc, episodes)
-	if err == nil {
-		pageData := parseRouterData(body)
-		page := routerLoaderMap(pageData, "search_(keyword)/page", "search_")
-		rows, ok := page["searchList"].([]any)
-		if ok {
-			for _, row := range rows {
-				d := dramaFromAny(row, "短剧")
-				addOrMerge(d)
+
+	// 2. Fetch official web search API results (richer metadata: tags, desc, episodes, direct relevance)
+	rows, totalCount, hasMore, apiErr := c.fetchOfficialSearchAPI(ctx, keyword, 1)
+	if apiErr == nil && len(rows) > 0 {
+		for _, row := range rows {
+			d := dramaFromAny(row, "短剧")
+			addOrMerge(d)
+		}
+		if totalCount > total {
+			total = totalCount
+		}
+
+		// Fetch page 2 if more results are available (up to 20 items for rich catalogue results)
+		if hasMore {
+			if rowsP2, _, _, errP2 := c.fetchOfficialSearchAPI(ctx, keyword, 2); errP2 == nil && len(rowsP2) > 0 {
+				for _, row := range rowsP2 {
+					d := dramaFromAny(row, "短剧")
+					addOrMerge(d)
+				}
 			}
-			t, _ := strconv.Atoi(mapString(page, "totalCount"))
-			if t > total {
-				total = t
+		}
+	} else {
+		// Fallback to legacy web HTML router data if API failed
+		pageURL := fmt.Sprintf("%s/search/%s", WebBaseURL, url.PathEscape(keyword))
+		if body, err := c.FetchWebText(ctx, pageURL, WebBaseURL+"/"); err == nil {
+			pageData := parseRouterData(body)
+			page := routerLoaderMap(pageData, "search_(keyword)/page", "search_")
+			if legacyRows, ok := page["searchList"].([]any); ok {
+				for _, row := range legacyRows {
+					d := dramaFromAny(row, "短剧")
+					addOrMerge(d)
+				}
+				t, _ := strconv.Atoi(mapString(page, "totalCount"))
+				if t > total {
+					total = t
+				}
 			}
 		}
 	}
 
-	// Then merge suggestion results
+	// 3. Merge suggestion results to fill in missing metadata or extra matching items
 	for _, d := range names {
 		addOrMerge(d)
 	}
@@ -287,6 +306,59 @@ func (c *Client) fetchSearchNames(ctx context.Context, keyword string) ([]Drama,
 		}
 	}
 	return list, nil
+}
+
+func (c *Client) fetchOfficialSearchAPI(ctx context.Context, keyword string, page int) ([]any, int, bool, error) {
+	if page < 1 {
+		page = 1
+	}
+	apiURL := fmt.Sprintf("%s/api/search/result?query=%s&page=%d", WebBaseURL, url.QueryEscape(keyword), page)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
+	if err != nil {
+		return nil, 0, false, err
+	}
+	req.Header.Set("User-Agent", WebUserAgent)
+	req.Header.Set("Referer", fmt.Sprintf("%s/search/%s", WebBaseURL, url.PathEscape(keyword)))
+	req.Header.Set("Accept", "application/json, text/plain, */*")
+
+	resp, err := c.DoHTTP(req)
+	if err != nil {
+		return nil, 0, false, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, 0, false, fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 5<<20))
+	if err != nil {
+		return nil, 0, false, err
+	}
+
+	var res struct {
+		SearchList []any `json:"searchList"`
+		TotalCount any   `json:"totalCount"`
+		PageNum    any   `json:"pageNum"`
+		TotalPages any   `json:"totalPages"`
+		HasMore    bool  `json:"hasMore"`
+	}
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
+	if err := dec.Decode(&res); err != nil {
+		return nil, 0, false, err
+	}
+
+	totalCount := 0
+	if n, ok := res.TotalCount.(json.Number); ok {
+		if v, err := n.Int64(); err == nil {
+			totalCount = int(v)
+		}
+	} else if s, ok := res.TotalCount.(string); ok {
+		totalCount, _ = strconv.Atoi(s)
+	}
+
+	return res.SearchList, totalCount, res.HasMore, nil
 }
 
 func normalizeSearchText(text string) string {

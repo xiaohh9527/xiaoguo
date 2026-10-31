@@ -443,7 +443,7 @@ func dramaFromAny(v any, defaultCategory string) Drama {
 		genre = defaultCategory
 	}
 
-	heat := firstNonEmpty(mapString(vd, "hot_count"), mapString(vd, "heat"))
+	heat := firstNonEmpty(mapString(vd, "hot_count"), mapString(vd, "heat"), mapString(nestedMap(vd, "hot_score_data"), "text"))
 	if heat == "" {
 		heat = mapString(vd, "series_play_cnt", "play_cnt")
 	}
