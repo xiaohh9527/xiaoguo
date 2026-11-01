@@ -97,15 +97,15 @@ func (c *Client) ResolvePlayback(ctx context.Context, seriesID, videoID string) 
 }
 
 func (c *Client) doResolvePlayback(ctx context.Context, seriesID, videoID string) (PlaybackInfo, error) {
-	// 1. Try Web player first (uses official unencrypted fallback-play-info: 100% reliable, zero risk of WAF block)
-	info, webErr := c.resolveWebMedia(ctx, seriesID, videoID)
-	if webErr == nil && len(info.Variants) > 0 {
+	// 1. Try App video model first (provides full 1080P/720P/540P/480P ladder with CENC decryption, maximum native quality)
+	info, appErr := c.resolveAppMedia(ctx, seriesID, videoID)
+	if appErr == nil && len(info.Variants) > 0 {
 		return info, nil
 	}
 
-	// 2. Try App video model
-	info, appErr := c.resolveAppMedia(ctx, seriesID, videoID)
-	if appErr == nil && len(info.Variants) > 0 {
+	// 2. Try Web media fallback (router page or 360p fallback-play-info if App request fails)
+	info, webErr := c.resolveWebMedia(ctx, seriesID, videoID)
+	if webErr == nil && len(info.Variants) > 0 {
 		return info, nil
 	}
 
@@ -115,7 +115,7 @@ func (c *Client) doResolvePlayback(ctx context.Context, seriesID, videoID string
 		return info, nil
 	}
 
-	return PlaybackInfo{}, fmt.Errorf("解析播放地址失败: web=%v, app=%v, backup=%w", webErr, appErr, apiErr)
+	return PlaybackInfo{}, fmt.Errorf("解析播放地址失败: app=%v, web=%v, backup=%w", appErr, webErr, apiErr)
 }
 
 func parseVideoModelMap(result map[string]any, videoID string) map[string]any {
@@ -516,33 +516,24 @@ func (c *Client) fetchWebProtectedFallbackPlayInfo(ctx context.Context, seriesID
 			continue
 		}
 
-		// Provide standard quality definition lines (1080p, 720p, 540p, 480p) pointing to this high-quality unencrypted stream
-		qualities := []struct {
-			def string
-			q   int
-		}{
-			{"1080p", 1080},
-			{"720p", 720},
-			{"540p", 540},
-			{"480p", 480},
-		}
-		var variants []MediaVariant
-		for _, item := range qualities {
-			variants = append(variants, MediaVariant{
+			// Note: official web fallback-play-info provides an unencrypted 360p preview/fallback stream.
+			// Accurately mark it as 360p instead of falsely masquerading as 1080p/720p.
+			variant := MediaVariant{
 				URL:        mainURL,
-				Definition: item.def,
-				Quality:    item.q,
+				Definition: "360p",
+				Quality:    360,
+				Width:      640,
+				Height:     360,
 				Codec:      "h264",
 				Encrypted:  false,
-			})
-		}
+			}
 
-		return PlaybackInfo{
-			SeriesID: seriesID,
-			VideoID:  videoID,
-			Selected: variants[0],
-			Variants: variants,
-		}, nil
+			return PlaybackInfo{
+				SeriesID: seriesID,
+				VideoID:  videoID,
+				Selected: variant,
+				Variants: []MediaVariant{variant},
+			}, nil
 	}
 
 	return PlaybackInfo{}, lastErr

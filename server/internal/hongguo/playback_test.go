@@ -144,3 +144,54 @@ func TestFullSeriesNonFreeEpisodesPlayback(t *testing.T) {
 	}
 }
 
+func TestTianTing1080PResolutionAndPlayback(t *testing.T) {
+	client := hongguo.NewClient()
+	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
+	defer cancel()
+
+	seriesID := "7686497244547140632" // 考上天庭公务员，我的干爹是雷祖
+	videoID := "7686550698321792024"  // 第1集
+
+	info, err := client.ResolvePlayback(ctx, seriesID, videoID)
+	if err != nil {
+		t.Fatalf("ResolvePlayback failed: %v", err)
+	}
+
+	t.Logf("TianTing Ep 1 Selected: Def=%s, Quality=%d, Encrypted=%v",
+		info.Selected.Definition, info.Selected.Quality, info.Selected.Encrypted)
+
+	if info.Selected.Quality != 1080 || info.Selected.Definition != "1080p" {
+		t.Fatalf("expected selected quality to be 1080p, got %s (%d)", info.Selected.Definition, info.Selected.Quality)
+	}
+
+	// Verify 1080p variant exists and has height >= 1080
+	var v1080 hongguo.MediaVariant
+	for _, v := range info.Variants {
+		if v.Quality == 1080 {
+			v1080 = v
+			break
+		}
+	}
+	if v1080.URL == "" {
+		t.Fatalf("1080p variant not found in variants list")
+	}
+
+	tempDir := t.TempDir()
+	sm := hongguo.NewStreamManager(tempDir, client)
+	path, err := sm.GetDecryptedVideo(ctx, seriesID, videoID, v1080)
+	if err != nil {
+		t.Fatalf("GetDecryptedVideo failed: %v", err)
+	}
+
+	w, h, err := hongguo.GetMP4Resolution(path)
+	if err != nil {
+		t.Fatalf("GetMP4Resolution failed: %v", err)
+	}
+
+	t.Logf("Verified MP4 Output Resolution: %dx%d (Path: %s)", w, h, path)
+	if w != 1920 || h != 1080 {
+		t.Fatalf("expected 1920x1080 MP4 video, but got %dx%d (360p fallback bug reproduced)", w, h)
+	}
+}
+
+
