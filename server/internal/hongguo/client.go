@@ -45,28 +45,85 @@ type DeviceProfile struct {
 	Resolution  string `json:"resolution"`
 	DPI         string `json:"dpi"`
 	Channel     string `json:"channel"`
+	UserAgent   string `json:"user_agent,omitempty"`
 }
 
-func defaultDeviceProfile() DeviceProfile {
-	return DeviceProfile{
-		DeviceID:    "3190157066913784",
-		InstallID:   "3190157066917880",
-		CDID:        "2766eb71-cfb9-459c-ad65-f18992710f81",
-		OpenUDID:    "39e48263544334b9",
-		DeviceToken: "AAA34LSTPJCHN37ZUR6CKGZTEC4IVTBFXCPJPZ7DAV57ZIRXC6NLV364U6YHQPQNDD34WESPQZCGGWUYPAO7HQZPKSGU3P4M5BSGLZHXY6NAIFURTPROB47LK6LR4",
-		TTReq:       "1$3a7d9a34dc7d473a93c32e0c9145ab3589b23d25",
-		DeviceBrand: "xiaomi",
-		DeviceType:  "23127PN0CC",
-		OSVersion:   "14",
-		OSAPI:       "25",
-		Resolution:  "1200*2670",
-		DPI:         "460",
-		Channel:     "xiaomi_8662_64",
+func defaultDeviceProfiles() []DeviceProfile {
+	return []DeviceProfile{
+		{
+			DeviceID:    "1255017861116115",
+			InstallID:   "1255017860317411",
+			CDID:        "5261d52a-eb52-4d97-90ae-928238d0d215",
+			OpenUDID:    "c0dd9fd7e7f37a6c",
+			DeviceToken: "AAA7DT6HQUKXVIDQQY4QBRTFQLZOWWCFVQXPMRDTUG2ND45JRLNKSJZLYOYFKIXDCZFQRPFVP7MRJZBHPHUVAUCSLI3BKSCEKLMJZK776KW2QHVRZJWCAUPNOR754",
+			TTReq:       "1$3fce9d6c5a359b9e4bf2292e29f8bb393dc1ce66",
+			DeviceBrand: "xiaomi",
+			DeviceType:  "23127PN0CC",
+			OSVersion:   "14",
+			OSAPI:       "25",
+			Resolution:  "1200*2670",
+			DPI:         "460",
+			Channel:     "xiaomi_8662_64",
+			UserAgent:   "com.phoenix.read/73932 (Linux; U; Android 14; zh_CN; Xiaomi 14; Build/UKQ1.230804.001; Cronet/TTNetVersion:8d40f833 QuicVersion:462f352c 2026-08-31)",
+		},
+		{
+			DeviceID:    "1993888415882919",
+			InstallID:   "1993888415887015",
+			CDID:        "42b5f13c-db08-40c0-ae3e-6005559ccf37",
+			OpenUDID:    "b28a0664c59d011d",
+			DeviceToken: "AAA3IECUXUYIRTQFDSLMK3GHQP3XLGW5CFW32MR3CH3U7OMIUDCA45LNTUJQJR3FQL4Q4O3C4OX4BDMAJWAKDREVQJ3NCF6XKHHPA3UUGMWOCEWQILR3OSA6JSLYA",
+			TTReq:       "1$7ff3a20288efb6f0a77d4e0c5316b8d56ffddad1",
+			DeviceBrand: "xiaomi",
+			DeviceType:  "23127PN0CC",
+			OSVersion:   "14",
+			OSAPI:       "25",
+			Resolution:  "1200*2670",
+			DPI:         "460",
+			Channel:     "xiaomi_8662_64",
+			UserAgent:   "com.phoenix.read/73932 (Linux; U; Android 14; zh_CN; Xiaomi 14; Build/UKQ1.230804.001; Cronet/TTNetVersion:8d40f833 QuicVersion:462f352c 2026-08-31)",
+		},
+		{
+			DeviceID:    "3190157066913784",
+			InstallID:   "3190157066917880",
+			CDID:        "2766eb71-cfb9-459c-ad65-f18992710f81",
+			OpenUDID:    "39e48263544334b9",
+			DeviceToken: "AAA34LSTPJCHN37ZUR6CKGZTEC4IVTBFXCPJPZ7DAV57ZIRXC6NLV364U6YHQPQNDD34WESPQZCGGWUYPAO7HQZPKSGU3P4M5BSGLZHXY6NAIFURTPROB47LK6LR4",
+			TTReq:       "1$3a7d9a34dc7d473a93c32e0c9145ab3589b23d25",
+			DeviceBrand: "xiaomi",
+			DeviceType:  "23127PN0CC",
+			OSVersion:   "14",
+			OSAPI:       "25",
+			Resolution:  "1200*2670",
+			DPI:         "460",
+			Channel:     "xiaomi_8662_64",
+			UserAgent:   "com.phoenix.read/73932 (Linux; U; Android 14; zh_CN; Xiaomi 14; Build/UKQ1.230804.001; Cronet/TTNetVersion:8d40f833 QuicVersion:462f352c 2026-08-31)",
+		},
+		{
+			DeviceID:    "797614684305320",
+			InstallID:   "797614683457464",
+			CDID:        "f222479a-ffa6-4262-bab8-279d9f701ee8",
+			OpenUDID:    "892bdf31d465060d",
+			DeviceToken: "AAARG6S7APMJXJ3HIBZZGM3YMBLRS2TOFDNYTTHYSS7WQXDM4MPDYOJQYRS3M3YVHVE3NEQD3CAQBHF47A22CD5A4RGK72QM2VRDETBDGDUD4ZOPEWIUAVV23AEYA",
+			TTReq:       "1$df51b637fb4664e066427b792fa89b0ee9ae9eac",
+			DeviceBrand: "xiaomi",
+			DeviceType:  "23127PN0CC",
+			OSVersion:   "7.1.2",
+			OSAPI:       "25",
+			Resolution:  "1200*2670",
+			DPI:         "460",
+			Channel:     "xiaomi_8662_64",
+			UserAgent:   "com.phoenix.read/73932 (Linux; U; Android 7.1.2; zh_CN; Xiaomi 14; Build/N2G47H; Cronet/TTNetVersion:8d40f833 QuicVersion:462f352c 2026-08-31)",
+		},
 	}
 }
 
-func loadDeviceProfile() DeviceProfile {
-	dev := defaultDeviceProfile()
+func loadDeviceProfiles() []DeviceProfile {
+	devices := defaultDeviceProfiles()
+	seen := make(map[string]bool)
+	for _, d := range devices {
+		seen[d.DeviceID] = true
+	}
+
 	candidates := []string{
 		"data/device.json",
 		"device.json",
@@ -81,41 +138,105 @@ func loadDeviceProfile() DeviceProfile {
 	for _, p := range candidates {
 		if data, err := os.ReadFile(p); err == nil && len(data) > 0 {
 			var loaded DeviceProfile
-			if err := json.Unmarshal(data, &loaded); err == nil && loaded.DeviceID != "" && loaded.DeviceID != "797614684305320" {
-				if loaded.CDID != "" {
-					dev.CDID = loaded.CDID
+			if err := json.Unmarshal(data, &loaded); err == nil && loaded.DeviceID != "" {
+				if loaded.OSAPI == "" {
+					loaded.OSAPI = "25"
 				}
-				if loaded.OpenUDID != "" {
-					dev.OpenUDID = loaded.OpenUDID
+				if loaded.Resolution == "" {
+					loaded.Resolution = "1200*2670"
 				}
-				if loaded.DeviceID != "" {
-					dev.DeviceID = loaded.DeviceID
+				if loaded.DPI == "" {
+					loaded.DPI = "460"
 				}
-				if loaded.InstallID != "" {
-					dev.InstallID = loaded.InstallID
-				} else if loaded.IID != "" {
-					dev.InstallID = loaded.IID
+				if loaded.Channel == "" {
+					loaded.Channel = "xiaomi_8662_64"
 				}
-				if loaded.Channel != "" {
-					dev.Channel = loaded.Channel
+				if !seen[loaded.DeviceID] {
+					seen[loaded.DeviceID] = true
+					devices = append([]DeviceProfile{loaded}, devices...)
 				}
-				break
 			}
 		}
 	}
-	return dev
+
+	// Try reading spare devices from hgplayer.db if available
+	var dbCandidates []string
+	if appData := os.Getenv("APPDATA"); appData != "" {
+		dbCandidates = append(dbCandidates, filepath.Join(appData, "hgplayer", "hgplayer.db"))
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		dbCandidates = append(dbCandidates, filepath.Join(home, ".config", "hgplayer", "hgplayer.db"))
+	}
+	for _, dbPath := range dbCandidates {
+		if dbData, err := os.ReadFile(dbPath); err == nil && len(dbData) > 0 {
+			needle := []byte("device:spares")
+			idx := bytes.LastIndex(dbData, needle)
+			if idx != -1 {
+				jsonStart := idx + len(needle)
+				jsonEnd := bytes.Index(dbData[jsonStart:], []byte(`],"current"`))
+				if jsonEnd != -1 {
+					fullJSON := string(dbData[jsonStart:jsonStart+jsonEnd+len(`],"current"`)]) + ":0}"
+					var res struct {
+						Devices []DeviceProfile `json:"devices"`
+					}
+					if err := json.Unmarshal([]byte(fullJSON), &res); err == nil {
+						for _, d := range res.Devices {
+							if d.DeviceID != "" && !seen[d.DeviceID] {
+								seen[d.DeviceID] = true
+								if d.OSAPI == "" {
+									d.OSAPI = "25"
+								}
+								devices = append([]DeviceProfile{d}, devices...)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return devices
 }
 
 type Client struct {
-	mu           sync.Mutex
-	httpClient   *http.Client
-	device       DeviceProfile
-	details      map[string]detailCacheEntry
-	searches     map[string]SearchEntry
-	suggestions  map[string]suggestionCacheEntry
-	danmaku      map[string]danmakuCacheEntry
-	playbacks    map[string]playbackCacheEntry
-	playbackJobs map[string]*playbackJob
+	mu             sync.Mutex
+	httpClient     *http.Client
+	deviceProfiles []DeviceProfile
+	deviceIndex    int
+	details        map[string]detailCacheEntry
+	searches       map[string]SearchEntry
+	suggestions    map[string]suggestionCacheEntry
+	danmaku        map[string]danmakuCacheEntry
+	playbacks      map[string]playbackCacheEntry
+	playbackJobs   map[string]*playbackJob
+}
+
+func (c *Client) CurrentDevice() DeviceProfile {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.deviceProfiles) == 0 {
+		return defaultDeviceProfiles()[0]
+	}
+	return c.deviceProfiles[c.deviceIndex%len(c.deviceProfiles)]
+}
+
+func (c *Client) RotateDevice() DeviceProfile {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.deviceProfiles) <= 1 {
+		if len(c.deviceProfiles) == 0 {
+			return defaultDeviceProfiles()[0]
+		}
+		return c.deviceProfiles[0]
+	}
+	c.deviceIndex = (c.deviceIndex + 1) % len(c.deviceProfiles)
+	return c.deviceProfiles[c.deviceIndex]
+}
+
+func (c *Client) DevicePool() []DeviceProfile {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]DeviceProfile(nil), c.deviceProfiles...)
 }
 
 type playbackCacheEntry struct {
@@ -163,20 +284,18 @@ func NewClient() *Client {
 			Jar:       jar,
 			Timeout:   35 * time.Second,
 		},
-		device:       loadDeviceProfile(),
-		details:      make(map[string]detailCacheEntry),
-		searches:     make(map[string]SearchEntry),
-		suggestions:  make(map[string]suggestionCacheEntry),
-		danmaku:      make(map[string]danmakuCacheEntry),
-		playbacks:    make(map[string]playbackCacheEntry),
-		playbackJobs: make(map[string]*playbackJob),
+		deviceProfiles: loadDeviceProfiles(),
+		details:        make(map[string]detailCacheEntry),
+		searches:       make(map[string]SearchEntry),
+		suggestions:    make(map[string]suggestionCacheEntry),
+		danmaku:        make(map[string]danmakuCacheEntry),
+		playbacks:      make(map[string]playbackCacheEntry),
+		playbackJobs:   make(map[string]*playbackJob),
 	}
 }
 
 func (c *Client) AppRequest(ctx context.Context, method, path string, extra url.Values, payload any, isComment bool) (map[string]any, error) {
-	c.mu.Lock()
-	dev := c.device
-	c.mu.Unlock()
+	dev := c.CurrentDevice()
 
 	query := url.Values{
 		"aid":                   {"8662"},

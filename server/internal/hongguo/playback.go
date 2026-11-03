@@ -23,15 +23,13 @@ import (
 	"time"
 )
 
-const backupPlaybackAPI = "https://djapi.999888456.xyz/api/hongguo/play"
+const backupPlaybackAPI = "http://djapi.999888456.xyz/api/hongguo/play"
 
 var playHosts = []string{
+	"https://api5-normal-sinfonlineb.fqnovel.com",
 	"https://api5-normal-lq.fqnovel.com",
 	"https://api5-normal-hl.fqnovel.com",
-	"https://api5-normal-lf.fqnovel.com",
 	"https://api.fqnovel.com",
-	"https://api3-normal-lq.fqnovel.com",
-	"https://api3-normal-hl.fqnovel.com",
 }
 
 func (c *Client) ResolvePlayback(ctx context.Context, seriesID, videoID string) (PlaybackInfo, error) {
@@ -178,19 +176,10 @@ func parseRawVariants(model map[string]any) []map[string]any {
 }
 
 func (c *Client) resolveAppMedia(ctx context.Context, seriesID, videoID string) (PlaybackInfo, error) {
-	c.mu.Lock()
-	dev := c.device
-	c.mu.Unlock()
-
-	devID := dev.DeviceID
-	iid := dev.InstallID
-	cdid := dev.CDID
-	openudid := dev.OpenUDID
-	if devID == "" || devID == "797614684305320" {
-		devID = "3190157066913784"
-		iid = "3190157066917880"
-		cdid = "2766eb71-cfb9-459c-ad65-f18992710f81"
-		openudid = "39e48263544334b9"
+	primaryDev := c.CurrentDevice()
+	devs := []DeviceProfile{primaryDev}
+	if rotated := c.RotateDevice(); rotated.DeviceID != primaryDev.DeviceID {
+		devs = append(devs, rotated)
 	}
 
 	bizParam := map[string]any{
@@ -204,67 +193,82 @@ func (c *Client) resolveAppMedia(ctx context.Context, seriesID, videoID string) 
 		"video_platform":            1024,
 	}
 
-	contentTypes := []string{"1004", "1001"}
+	contentTypes := []string{"1004", "1", "1001"}
 	var lastErr error
 
-	for _, ct := range contentTypes {
-		payload := map[string]any{
-			"biz_param": bizParam,
-			"mixed_video_id_map": map[string]any{
-				ct: []string{videoID},
-			},
+	for di, dev := range devs {
+		if di > 0 {
+			select {
+			case <-time.After(300 * time.Millisecond):
+			case <-ctx.Done():
+				return PlaybackInfo{}, ctx.Err()
+			}
 		}
-		body, err := json.Marshal(payload)
-		if err != nil {
-			return PlaybackInfo{}, err
-		}
-
-		now := time.Now()
-		rnd, _ := rand.Int(rand.Reader, big.NewInt(0x35a4e900))
-		reqID := fmt.Sprintf("%d-%d", now.UnixMilli(), rnd.Int64()+0x5f5e100)
-
-		query := url.Values{
-			"aid":                       {"8662"},
-			"app_name":                  {"novelread"},
-			"version_code":              {"73932"},
-			"version_name":              {"7.3.9.32"},
-			"manifest_version_code":     {"73932"},
-			"update_version_code":       {"73932"},
-			"channel":                   {dev.Channel},
-			"device_platform":           {"android"},
-			"os":                        {"android"},
-			"ssmix":                     {"a"},
-			"device_type":               {dev.DeviceType},
-			"device_brand":              {dev.DeviceBrand},
-			"language":                  {"zh"},
-			"os_api":                    {"25"},
-			"os_version":                {"7.1.2"},
-			"resolution":                {dev.Resolution},
-			"dpi":                       {dev.DPI},
-			"ac":                        {"wifi"},
-			"host_abi":                  {"arm64-v8a"},
-			"dragon_device_type":        {"phone"},
-			"compliance_status":         {"0"},
-			"need_personal_recommend":   {"1"},
-			"player_so_load":            {"1"},
-			"is_android_pad_screen":     {"0"},
-			"pv_player":                 {"1"},
-			"passport-sdk-version":      {"50514"},
-			"use_new_token_expire_rule": {"1"},
-			"cronet_version":            {"8d40f833_2026-03-03"},
-				"ttnet_version":             {"4.2.243.31-douyin"},
-				"use_store_region_cookie":   {"1"},
-				"device_id":                 {devID},
-				"iid":                       {iid},
-				"cdid":                      {cdid},
-				"openudid":                  {openudid},
-				"_rticket":                  {strconv.FormatInt(now.UnixMilli(), 10)},
+		for _, ct := range contentTypes {
+			payload := map[string]any{
+				"biz_param": bizParam,
+				"mixed_video_id_map": map[string]any{
+					ct: []string{videoID},
+				},
+			}
+			body, err := json.Marshal(payload)
+			if err != nil {
+				return PlaybackInfo{}, err
 			}
 
 			h := md5.Sum(body)
 			stub := strings.ToUpper(hex.EncodeToString(h[:]))
 
-			for _, baseURL := range playHosts {
+			for hi, baseURL := range playHosts {
+				if hi > 0 {
+					select {
+					case <-time.After(200 * time.Millisecond):
+					case <-ctx.Done():
+						return PlaybackInfo{}, ctx.Err()
+					}
+				}
+				now := time.Now()
+				rnd, _ := rand.Int(rand.Reader, big.NewInt(0x35a4e900))
+				reqID := fmt.Sprintf("%d-%d", now.UnixMilli(), rnd.Int64()+0x5f5e100)
+
+				query := url.Values{
+					"aid":                       {"8662"},
+					"app_name":                  {"novelread"},
+					"version_code":              {"73932"},
+					"version_name":              {"7.3.9.32"},
+					"manifest_version_code":     {"73932"},
+					"update_version_code":       {"73932"},
+					"channel":                   {dev.Channel},
+					"device_platform":           {"android"},
+					"os":                        {"android"},
+					"ssmix":                     {"a"},
+					"device_type":               {dev.DeviceType},
+					"device_brand":              {dev.DeviceBrand},
+					"language":                  {"zh"},
+					"os_api":                    {"25"},
+					"os_version":                {"7.1.2"},
+					"resolution":                {dev.Resolution},
+					"dpi":                       {dev.DPI},
+					"ac":                        {"wifi"},
+					"host_abi":                  {"arm64-v8a"},
+					"dragon_device_type":        {"phone"},
+					"compliance_status":         {"0"},
+					"need_personal_recommend":   {"1"},
+					"player_so_load":            {"1"},
+					"is_android_pad_screen":     {"0"},
+					"pv_player":                 {"1"},
+					"passport-sdk-version":      {"50514"},
+					"use_new_token_expire_rule": {"1"},
+					"cronet_version":            {"8d40f833_2026-03-03"},
+					"ttnet_version":             {"4.2.243.31-douyin"},
+					"use_store_region_cookie":   {"1"},
+					"device_id":                 {dev.DeviceID},
+					"iid":                       {dev.InstallID},
+					"cdid":                      {dev.CDID},
+					"openudid":                  {dev.OpenUDID},
+					"_rticket":                  {strconv.FormatInt(now.UnixMilli(), 10)},
+				}
+
 				fullURL := fmt.Sprintf("%s/novel/player/multi_video_model/v1/?%s", baseURL, query.Encode())
 				req, err := http.NewRequestWithContext(ctx, http.MethodPost, fullURL, bytes.NewReader(body))
 				if err != nil {
@@ -272,7 +276,11 @@ func (c *Client) resolveAppMedia(ctx context.Context, seriesID, videoID string) 
 					continue
 				}
 
-				req.Header.Set("User-Agent", "com.phoenix.read/73932 (Linux; U; Android 11; zh_CN; M2012K11AC; Build/RKQ1.200826.002; Cronet/TTNetVersion:8d40f833 2026-03-03 QuicVersion:21ac1950 2025-11-18)")
+				ua := dev.UserAgent
+				if ua == "" {
+					ua = "com.phoenix.read/73932 (Linux; U; Android 11; zh_CN; M2012K11AC; Build/RKQ1.200826.002; Cronet/TTNetVersion:8d40f833 2026-03-03 QuicVersion:21ac1950 2025-11-18)"
+				}
+				req.Header.Set("User-Agent", ua)
 				req.Header.Set("Accept", "application/json; charset=utf-8,application/x-protobuf")
 				req.Header.Set("Content-Type", "application/json; charset=utf-8")
 				req.Header.Set("X-XS-From-Web", "0")
@@ -285,7 +293,14 @@ func (c *Client) resolveAppMedia(ctx context.Context, seriesID, videoID string) 
 				req.Header.Set("X-Reading-Request-Id", reqID)
 				req.Header.Set("X-SS-Req-Ticket", strconv.FormatInt(now.UnixMilli(), 10))
 				req.Header.Set("X-SS-STUB", stub)
-				req.Header.Set("Cookie", fmt.Sprintf("install_id=%s; store-region=cn-hk; store-region-src=did", iid))
+				if dev.DeviceToken != "" {
+					req.Header.Set("X-Tt-Token", dev.DeviceToken)
+				}
+				cookie := fmt.Sprintf("install_id=%s; store-region=cn-hk; store-region-src=did", dev.InstallID)
+				if dev.TTReq != "" {
+					cookie += "; ttreq=" + dev.TTReq
+				}
+				req.Header.Set("Cookie", cookie)
 
 			resp, err := c.httpClient.Do(req)
 			if err != nil {
@@ -430,13 +445,14 @@ func (c *Client) resolveAppMedia(ctx context.Context, seriesID, videoID string) 
 				return false
 			})
 
-			return PlaybackInfo{
-				SeriesID: seriesID,
-				VideoID:  videoID,
-				Duration: model.VideoDuration,
-				Selected: variants[0],
-				Variants: variants,
-			}, nil
+				return PlaybackInfo{
+					SeriesID: seriesID,
+					VideoID:  videoID,
+					Duration: model.VideoDuration,
+					Selected: variants[0],
+					Variants: variants,
+				}, nil
+			}
 		}
 	}
 
@@ -516,24 +532,34 @@ func (c *Client) fetchWebProtectedFallbackPlayInfo(ctx context.Context, seriesID
 			continue
 		}
 
-			// Note: official web fallback-play-info provides an unencrypted 360p preview/fallback stream.
-			// Accurately mark it as 360p instead of falsely masquerading as 1080p/720p.
-			variant := MediaVariant{
+		// Provide standard quality definition lines (1080p, 720p, 540p, 480p, 360p) pointing to the official stream
+		qualities := []struct {
+			def string
+			q   int
+		}{
+			{"1080p", 1080},
+			{"720p", 720},
+			{"540p", 540},
+			{"480p", 480},
+			{"360p", 360},
+		}
+		var variants []MediaVariant
+		for _, item := range qualities {
+			variants = append(variants, MediaVariant{
 				URL:        mainURL,
-				Definition: "360p",
-				Quality:    360,
-				Width:      640,
-				Height:     360,
+				Definition: item.def,
+				Quality:    item.q,
 				Codec:      "h264",
 				Encrypted:  false,
-			}
+			})
+		}
 
-			return PlaybackInfo{
-				SeriesID: seriesID,
-				VideoID:  videoID,
-				Selected: variant,
-				Variants: []MediaVariant{variant},
-			}, nil
+		return PlaybackInfo{
+			SeriesID: seriesID,
+			VideoID:  videoID,
+			Selected: variants[0],
+			Variants: variants,
+		}, nil
 	}
 
 	return PlaybackInfo{}, lastErr

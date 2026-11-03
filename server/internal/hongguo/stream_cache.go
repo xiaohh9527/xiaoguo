@@ -154,7 +154,7 @@ func (sm *StreamManager) cleanHEICCache() {
 		}
 	}
 
-	// Clean stale/corrupted encrypted video caches or masquerading low-res caches on startup
+	// Clean stale/corrupted encrypted video caches on startup
 	videoDir := filepath.Join(sm.cacheDir, "videos")
 	if entries, err := os.ReadDir(videoDir); err == nil {
 		for _, e := range entries {
@@ -162,14 +162,6 @@ func (sm *StreamManager) cleanHEICCache() {
 				vPath := filepath.Join(videoDir, e.Name())
 				if isFileCENCEncrypted(vPath) {
 					_ = os.Remove(vPath)
-					continue
-				}
-				// If filename ends with _1080.mp4 or _720.mp4 but actual height is < 540, remove stale cache
-				if strings.HasSuffix(e.Name(), "_1080.mp4") || strings.HasSuffix(e.Name(), "_720.mp4") {
-					_, h, _ := GetMP4Resolution(vPath)
-					if h > 0 && h < 540 {
-						_ = os.Remove(vPath)
-					}
 				}
 			}
 		}
@@ -190,8 +182,8 @@ func (sm *StreamManager) GetDecryptedVideo(ctx context.Context, seriesID, videoI
 			// Stale encrypted cache detected, remove it so it can be re-decrypted properly
 			_ = os.Remove(cacheFilePath)
 		} else {
-			// Verify cached resolution matches requested quality (prevent stale 360p masquerading as 1080p/720p)
-			if variant.Quality >= 720 {
+			// Verify cached resolution matches requested quality for encrypted streams
+			if variant.Encrypted && variant.Quality >= 720 {
 				_, h, _ := GetMP4Resolution(cacheFilePath)
 				if h > 0 && h < 540 {
 					// Stale low-res cache masquerading as HD, clean up
