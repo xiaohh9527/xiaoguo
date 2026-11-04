@@ -183,7 +183,24 @@ func TestTianTing1080PResolutionAndPlayback(t *testing.T) {
 		t.Fatalf("GetDecryptedVideo failed: %v", err)
 	}
 
-	t.Logf("Verified Video Output (Path: %s)", path)
+	w, h, err := hongguo.GetMP4Resolution(path)
+	if err != nil {
+		t.Fatalf("GetMP4Resolution failed: %v", err)
+	}
+
+	t.Logf("Verified Video Output Resolution: %dx%d (Path: %s)", w, h, path)
+	if w < 720 && h < 720 {
+		t.Fatalf("expected HD resolution >= 720, got %dx%d (360p fallback bug reproduced)", w, h)
+	}
+}
+
+func TestDecodeHongguoContentKeyDirect(t *testing.T) {
+	spade := "nbwT8l6OFPRdviXDWJMl7l+hFelbpBP1aY8SwV68E/OTvdtXVw=="
+	key, err := hongguo.DecodeHongguoContentKey(spade)
+	if err != nil {
+		t.Fatalf("DecodeHongguoContentKey failed: %v", err)
+	}
+	t.Logf("Decoded key: %x", key)
 }
 
 

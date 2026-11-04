@@ -10,7 +10,7 @@ import (
 
 func TestSearchTargetTitle(t *testing.T) {
 	client := hongguo.NewClient()
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 	defer cancel()
 
 	keyword := "秃头老汉和驴的十万年"

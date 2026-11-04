@@ -2,6 +2,7 @@ package hongguo
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
@@ -27,6 +28,7 @@ const backupPlaybackAPI = "http://djapi.999888456.xyz/api/hongguo/play"
 
 var playHosts = []string{
 	"https://api5-normal-sinfonlineb.fqnovel.com",
+	"https://api5-normal-sinfonlinea.fqnovel.com",
 	"https://api5-normal-lq.fqnovel.com",
 	"https://api5-normal-hl.fqnovel.com",
 	"https://api.fqnovel.com",
@@ -176,6 +178,258 @@ func parseRawVariants(model map[string]any) []map[string]any {
 }
 
 func (c *Client) resolveAppMedia(ctx context.Context, seriesID, videoID string) (PlaybackInfo, error) {
+	// 1. Primary: GET /reading/bookapi/video_tab/multi_video_model/v1/ (high reliability, true 1080P/720P/540P/480P/360P quality ladder)
+	info, err := c.resolveVideoTabModel(ctx, seriesID, videoID)
+	if err == nil && len(info.Variants) > 0 {
+		return info, nil
+	}
+
+	// 2. Fallback: POST /novel/player/multi_video_model/v1/
+	infoLegacy, errLegacy := c.resolveLegacyMultiVideoModel(ctx, seriesID, videoID)
+	if errLegacy == nil && len(infoLegacy.Variants) > 0 {
+		return infoLegacy, nil
+	}
+
+	if err != nil {
+		return PlaybackInfo{}, err
+	}
+	return PlaybackInfo{}, errLegacy
+}
+
+func (c *Client) resolveVideoTabModel(ctx context.Context, seriesID, videoID string) (PlaybackInfo, error) {
+	dev := c.CurrentDevice()
+	now := time.Now()
+	nowMs := strconv.FormatInt(now.UnixMilli(), 10)
+
+	aids := []string{"1967", "8662"}
+	var lastErr error
+
+	for _, aid := range aids {
+		query := url.Values{
+			"video_id":                  {videoID},
+			"video_platform":            {"1024"},
+			"need_all_video_definition": {"true"},
+			"aid":                       {aid},
+			"app_name":                  {"novelread"},
+			"version_code":              {"73932"},
+			"version_name":              {"7.3.9.32"},
+			"manifest_version_code":     {"73932"},
+			"update_version_code":       {"73932"},
+			"channel":                   {dev.Channel},
+			"device_platform":           {"android"},
+			"os":                        {"android"},
+			"ssmix":                     {"a"},
+			"device_type":               {dev.DeviceType},
+			"device_brand":              {dev.DeviceBrand},
+			"language":                  {"zh"},
+			"os_api":                    {"25"},
+			"os_version":                {"7.1.2"},
+			"resolution":                {dev.Resolution},
+			"dpi":                       {dev.DPI},
+			"ac":                        {"wifi"},
+			"device_id":                 {dev.DeviceID},
+			"iid":                       {dev.InstallID},
+			"cdid":                      {dev.CDID},
+			"openudid":                  {dev.OpenUDID},
+			"_rticket":                  {nowMs},
+		}
+
+		for hi, baseURL := range playHosts {
+			if hi > 0 {
+				select {
+				case <-time.After(150 * time.Millisecond):
+				case <-ctx.Done():
+					return PlaybackInfo{}, ctx.Err()
+				}
+			}
+
+			fullURL := fmt.Sprintf("%s/reading/bookapi/video_tab/multi_video_model/v1/?%s", baseURL, query.Encode())
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, fullURL, nil)
+			if err != nil {
+				lastErr = err
+				continue
+			}
+
+			ua := dev.UserAgent
+			if ua == "" {
+				ua = AppUserAgent
+			}
+			req.Header.Set("User-Agent", ua)
+			req.Header.Set("Accept", "application/json")
+			req.Header.Set("Accept-Encoding", "gzip")
+			req.Header.Set("X-XS-From-Web", "0")
+			req.Header.Set("Sdk-Version", "2")
+			req.Header.Set("X-SS-REQ-TICKET", nowMs)
+
+			resp, err := c.httpClient.Do(req)
+			if err != nil {
+				lastErr = err
+				continue
+			}
+
+			var reader io.Reader = resp.Body
+			if resp.Header.Get("Content-Encoding") == "gzip" {
+				if gz, gzErr := gzip.NewReader(resp.Body); gzErr == nil {
+					defer gz.Close()
+					reader = gz
+				}
+			}
+
+			respBody, readErr := io.ReadAll(io.LimitReader(reader, 10<<20))
+			resp.Body.Close()
+			if readErr != nil {
+				lastErr = readErr
+				continue
+			}
+
+			if resp.StatusCode != http.StatusOK || len(respBody) == 0 {
+				lastErr = fmt.Errorf("HTTP %d, len %d", resp.StatusCode, len(respBody))
+				continue
+			}
+
+			var result struct {
+				Code int `json:"code"`
+				Data struct {
+					VideoModelData map[string]struct {
+						VideoModel string `json:"video_model"`
+					} `json:"video_model_data"`
+					VideoModel string `json:"video_model"`
+				} `json:"data"`
+			}
+			dec := json.NewDecoder(bytes.NewReader(respBody))
+			dec.UseNumber()
+			if err := dec.Decode(&result); err != nil {
+				lastErr = err
+				continue
+			}
+
+			vmStr := ""
+			if result.Data.VideoModelData != nil {
+				if item, ok := result.Data.VideoModelData[videoID]; ok {
+					vmStr = item.VideoModel
+				}
+			}
+			if vmStr == "" {
+				vmStr = result.Data.VideoModel
+			}
+			if vmStr == "" {
+				lastErr = fmt.Errorf("未找到视频 %s 模型数据", videoID)
+				continue
+			}
+
+			info, parseErr := parseVideoModelJSON(vmStr, seriesID, videoID)
+			if parseErr == nil && len(info.Variants) > 0 {
+				return info, nil
+			}
+			if parseErr != nil {
+				lastErr = parseErr
+			}
+		}
+	}
+	return PlaybackInfo{}, lastErr
+}
+
+func parseVideoModelJSON(rawJSON, seriesID, videoID string) (PlaybackInfo, error) {
+	var modelMap map[string]any
+	dec := json.NewDecoder(strings.NewReader(rawJSON))
+	dec.UseNumber()
+	if err := dec.Decode(&modelMap); err != nil {
+		return PlaybackInfo{}, err
+	}
+
+	duration, _ := strconv.ParseFloat(mapString(modelMap, "video_duration", "duration"), 64)
+	rawVariants := parseRawVariants(modelMap)
+	if len(rawVariants) == 0 {
+		return PlaybackInfo{}, errors.New("无可用清晰度视频流")
+	}
+
+	var variants []MediaVariant
+	for _, v := range rawVariants {
+		meta := nestedMap(v, "video_meta")
+		codec := strings.ToLower(firstNonEmpty(mapString(meta, "codec_type"), mapString(v, "codec_type")))
+		if codec == "bytevc2" {
+			// 跳过第三方播放器无法解码画面黑屏的 bytevc2
+			continue
+		}
+
+		urls := extractMediaURLs(v)
+		if len(urls) == 0 {
+			continue
+		}
+		u := urls[0]
+
+		enc := nestedMap(v, "encrypt_info")
+		spade := firstNonEmpty(mapString(enc, "spade_a"), mapString(v, "spade_a"))
+		isEnc := spade != "" || enc["encrypt"] == true || v["encrypt"] == true || mapString(v, "encryption_method") == "cenc-aes-ctr"
+
+		var keyHex string
+		if spade != "" {
+			k, err := DecodeHongguoContentKey(spade)
+			if err == nil && len(k) == 16 {
+				keyHex = hex.EncodeToString(k)
+				isEnc = true
+			}
+		}
+
+		def := firstNonEmpty(mapString(meta, "definition"), mapString(v, "definition"))
+		height, _ := strconv.Atoi(firstNonEmpty(mapString(meta, "vheight"), mapString(v, "vheight")))
+		width, _ := strconv.Atoi(firstNonEmpty(mapString(meta, "vwidth"), mapString(v, "vwidth")))
+		sz, _ := strconv.ParseInt(firstNonEmpty(mapString(meta, "size"), mapString(v, "size")), 10, 64)
+
+		quality := height
+		defLower := strings.ToLower(def)
+		if strings.Contains(defLower, "1080") {
+			quality = 1080
+		} else if strings.Contains(defLower, "720") {
+			quality = 720
+		} else if strings.Contains(defLower, "540") {
+			quality = 540
+		} else if strings.Contains(defLower, "480") {
+			quality = 480
+		} else if strings.Contains(defLower, "360") {
+			quality = 360
+		} else if quality == 0 {
+			quality = 720
+		}
+
+		variants = append(variants, MediaVariant{
+			URL:        u,
+			Codec:      codec,
+			Definition: def,
+			Quality:    quality,
+			Width:      width,
+			Height:     height,
+			Size:       sz,
+			Encrypted:  isEnc,
+			CENCKeyHex: keyHex,
+		})
+	}
+
+	if len(variants) == 0 {
+		return PlaybackInfo{}, errors.New("无兼容的视频编码")
+	}
+
+	// Sort by quality descending: 1080p > 720p > 540p > 480p > 360p
+	sort.SliceStable(variants, func(i, j int) bool {
+		if variants[i].Quality != variants[j].Quality {
+			return variants[i].Quality > variants[j].Quality
+		}
+		if variants[i].Codec == "h264" && variants[j].Codec != "h264" {
+			return true
+		}
+		return false
+	})
+
+	return PlaybackInfo{
+		SeriesID: seriesID,
+		VideoID:  videoID,
+		Duration: duration,
+		Selected: variants[0],
+		Variants: variants,
+	}, nil
+}
+
+func (c *Client) resolveLegacyMultiVideoModel(ctx context.Context, seriesID, videoID string) (PlaybackInfo, error) {
 	primaryDev := c.CurrentDevice()
 	devs := []DeviceProfile{primaryDev}
 	if rotated := c.RotateDevice(); rotated.DeviceID != primaryDev.DeviceID {
@@ -278,7 +532,7 @@ func (c *Client) resolveAppMedia(ctx context.Context, seriesID, videoID string) 
 
 				ua := dev.UserAgent
 				if ua == "" {
-					ua = "com.phoenix.read/73932 (Linux; U; Android 11; zh_CN; M2012K11AC; Build/RKQ1.200826.002; Cronet/TTNetVersion:8d40f833 2026-03-03 QuicVersion:21ac1950 2025-11-18)"
+					ua = AppUserAgent
 				}
 				req.Header.Set("User-Agent", ua)
 				req.Header.Set("Accept", "application/json; charset=utf-8,application/x-protobuf")
@@ -302,156 +556,50 @@ func (c *Client) resolveAppMedia(ctx context.Context, seriesID, videoID string) 
 				}
 				req.Header.Set("Cookie", cookie)
 
-			resp, err := c.httpClient.Do(req)
-			if err != nil {
-				lastErr = err
-				continue
-			}
-
-			respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
-			resp.Body.Close()
-			if readErr != nil {
-				lastErr = readErr
-				continue
-			}
-
-			if resp.StatusCode != http.StatusOK || len(respBody) == 0 {
-				lastErr = fmt.Errorf("HTTP %d, len %d", resp.StatusCode, len(respBody))
-				continue
-			}
-
-			var result struct {
-				Code int `json:"code"`
-				Data map[string]struct {
-					VideoModel string `json:"video_model"`
-				} `json:"data"`
-			}
-			if err := json.Unmarshal(respBody, &result); err != nil {
-				lastErr = err
-				continue
-			}
-
-			item, ok := result.Data[videoID]
-			if !ok || item.VideoModel == "" {
-				lastErr = fmt.Errorf("未找到分集 %s 播放模型", videoID)
-				continue
-			}
-
-			var model struct {
-				VideoDuration float64 `json:"video_duration"`
-				VideoList     []struct {
-					MainURL     string `json:"main_url"`
-					BackupURL   string `json:"backup_url_1"`
-					BackupURL2  string `json:"backup_url"`
-					SpadeA      string `json:"spade_a"`
-					EncryptInfo struct {
-						Encrypt bool   `json:"encrypt"`
-						Method  string `json:"encryption_method"`
-						KID     string `json:"kid"`
-						SpadeA  string `json:"spade_a"`
-					} `json:"encrypt_info"`
-					VideoMeta struct {
-						Definition string `json:"definition"`
-						Quality    string `json:"quality"`
-						CodecType  string `json:"codec_type"`
-						VHeight    int    `json:"vheight"`
-						VWidth     int    `json:"vwidth"`
-						Size       int64  `json:"size"`
-					} `json:"video_meta"`
-				} `json:"video_list"`
-			}
-			if err := json.Unmarshal([]byte(item.VideoModel), &model); err != nil {
-				lastErr = err
-				continue
-			}
-
-			var variants []MediaVariant
-			for _, v := range model.VideoList {
-				codec := strings.ToLower(v.VideoMeta.CodecType)
-				if codec == "bytevc2" {
-					continue // 跳过第三方播放器无法解码画面黑屏的 bytevc2
-				}
-				u := strings.TrimSpace(v.MainURL)
-				if u == "" {
-					u = strings.TrimSpace(v.BackupURL)
-				}
-				if u == "" {
-					u = strings.TrimSpace(v.BackupURL2)
-				}
-				if u == "" {
+				resp, err := c.httpClient.Do(req)
+				if err != nil {
+					lastErr = err
 					continue
 				}
 
-				spadeA := strings.TrimSpace(v.EncryptInfo.SpadeA)
-				if spadeA == "" {
-					spadeA = strings.TrimSpace(v.SpadeA)
+				respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
+				resp.Body.Close()
+				if readErr != nil {
+					lastErr = readErr
+					continue
 				}
 
-				var keyHex string
-				isEnc := spadeA != "" || v.EncryptInfo.Encrypt || v.EncryptInfo.Method == "cenc-aes-ctr"
-				if spadeA != "" {
-					k, err := DecodeHongguoContentKey(spadeA)
-					if err == nil && len(k) == 16 {
-						keyHex = hex.EncodeToString(k)
-						isEnc = true
-					}
+				if resp.StatusCode != http.StatusOK || len(respBody) == 0 {
+					lastErr = fmt.Errorf("HTTP %d, len %d", resp.StatusCode, len(respBody))
+					continue
 				}
 
-				def := v.VideoMeta.Definition
-				height := v.VideoMeta.VHeight
-				width := v.VideoMeta.VWidth
-				quality := height
-				if strings.Contains(def, "1080") {
-					quality = 1080
-				} else if strings.Contains(def, "720") {
-					quality = 720
-				} else if strings.Contains(def, "540") {
-					quality = 540
-				} else if strings.Contains(def, "480") {
-					quality = 480
-				} else if strings.Contains(def, "360") {
-					quality = 360
+				var result struct {
+					Code int `json:"code"`
+					Data map[string]struct {
+						VideoModel string `json:"video_model"`
+					} `json:"data"`
 				}
-				if quality == 0 {
-					quality = 720
+				dec := json.NewDecoder(bytes.NewReader(respBody))
+				dec.UseNumber()
+				if err := dec.Decode(&result); err != nil {
+					lastErr = err
+					continue
 				}
 
-				variants = append(variants, MediaVariant{
-					URL:        u,
-					Codec:      codec,
-					Definition: def,
-					Quality:    quality,
-					Width:      width,
-					Height:     height,
-					Size:       v.VideoMeta.Size,
-					Encrypted:  isEnc,
-					CENCKeyHex: keyHex,
-				})
-			}
-
-			if len(variants) == 0 {
-				lastErr = fmt.Errorf("分集 %s 无可用兼容编码视频流", videoID)
-				continue
-			}
-
-			// Sort by quality descending: 1080p > 720p > 540p > 480p > 360p
-			sort.SliceStable(variants, func(i, j int) bool {
-				if variants[i].Quality != variants[j].Quality {
-					return variants[i].Quality > variants[j].Quality
+				item, ok := result.Data[videoID]
+				if !ok || item.VideoModel == "" {
+					lastErr = fmt.Errorf("未找到分集 %s 播放模型", videoID)
+					continue
 				}
-				if variants[i].Codec == "h264" && variants[j].Codec != "h264" {
-					return true
-				}
-				return false
-			})
 
-				return PlaybackInfo{
-					SeriesID: seriesID,
-					VideoID:  videoID,
-					Duration: model.VideoDuration,
-					Selected: variants[0],
-					Variants: variants,
-				}, nil
+				info, parseErr := parseVideoModelJSON(item.VideoModel, seriesID, videoID)
+				if parseErr == nil && len(info.Variants) > 0 {
+					return info, nil
+				}
+				if parseErr != nil {
+					lastErr = parseErr
+				}
 			}
 		}
 	}
@@ -532,34 +680,24 @@ func (c *Client) fetchWebProtectedFallbackPlayInfo(ctx context.Context, seriesID
 			continue
 		}
 
-		// Provide standard quality definition lines (1080p, 720p, 540p, 480p, 360p) pointing to the official stream
-		qualities := []struct {
-			def string
-			q   int
-		}{
-			{"1080p", 1080},
-			{"720p", 720},
-			{"540p", 540},
-			{"480p", 480},
-			{"360p", 360},
-		}
-		var variants []MediaVariant
-		for _, item := range qualities {
-			variants = append(variants, MediaVariant{
+			// Note: official web fallback-play-info provides an unencrypted 360p preview/fallback stream.
+			// Accurately mark it as 360p instead of falsely masquerading as 1080p/720p.
+			variant := MediaVariant{
 				URL:        mainURL,
-				Definition: item.def,
-				Quality:    item.q,
+				Definition: "360p",
+				Quality:    360,
+				Width:      640,
+				Height:     360,
 				Codec:      "h264",
 				Encrypted:  false,
-			})
-		}
+			}
 
-		return PlaybackInfo{
-			SeriesID: seriesID,
-			VideoID:  videoID,
-			Selected: variants[0],
-			Variants: variants,
-		}, nil
+			return PlaybackInfo{
+				SeriesID: seriesID,
+				VideoID:  videoID,
+				Selected: variant,
+				Variants: []MediaVariant{variant},
+			}, nil
 	}
 
 	return PlaybackInfo{}, lastErr
