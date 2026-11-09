@@ -92,7 +92,7 @@ func hongguoCommentLadon(aid string, timestamp uint32, prefix []byte) string {
 		left = mixed ^ bits.RotateLeft64(left, 3)
 		right, queue = queue[0], queue[1:]
 	}
-	data := hongguoCommentPad([]byte(strconv.FormatUint(uint64(timestamp), 10) + "-1611921764-3019"))
+	data := hongguoCommentPad([]byte(strconv.FormatUint(uint64(timestamp), 10) + "-" + appLadonID + "-3019"))
 	for offset := 0; offset < len(data); offset += 16 {
 		left, right := binary.LittleEndian.Uint64(data[offset:]), binary.LittleEndian.Uint64(data[offset+8:])
 		for _, key := range keys {
@@ -121,7 +121,7 @@ func hongguoCommentArgus(query string, timestamp uint32, nonce hongguoCommentNon
 	varint(2, 2)
 	varint(3, uint64(binary.LittleEndian.Uint32(nonce[6:10])))
 	bytesField(4, []byte("3019"))
-	bytesField(6, []byte("1611921764"))
+	bytesField(6, []byte(appLadonID))
 	bytesField(7, []byte("6.8.1.32"))
 	bytesField(8, []byte("v04.07.01-ml-android"))
 	varint(9, 135135744)
@@ -302,7 +302,7 @@ func hongguoAppArgus(query string, body []byte, stamp uint32, aid, deviceID, ver
 	varint(3, uint64(binary.LittleEndian.Uint32(nonce[6:10])&0x7fffffff))
 	bytesField(4, []byte(aid))
 	bytesField(5, []byte(deviceID))
-	bytesField(6, []byte("1611921764"))
+	bytesField(6, []byte(appLadonID))
 	bytesField(7, []byte(versionName))
 	bytesField(8, []byte("v04.07.01-ml-android"))
 	varint(9, 135135744)
@@ -366,12 +366,12 @@ func signHongguoAppPlayRequest(req *http.Request, body []byte, now time.Time) {
 	stamp := uint32(nowMs / 1000)
 
 	q := req.URL.Query()
-	aid := firstNonEmpty(q.Get("aid"), "8662")
+	aid := firstNonEmpty(q.Get("aid"), appAid)
 	deviceID := q.Get("device_id")
-	versionName := firstNonEmpty(q.Get("version_name"), "7.3.9.32")
-	deviceType := firstNonEmpty(q.Get("device_type"), "25053RT47C")
-	osVersion := firstNonEmpty(q.Get("os_version"), "12")
-	channel := firstNonEmpty(q.Get("channel"), "update_64")
+	versionName := firstNonEmpty(q.Get("version_name"), appVersionName)
+	deviceType := firstNonEmpty(q.Get("device_type"), appDeviceType)
+	osVersion := firstNonEmpty(q.Get("os_version"), appOSVersion)
+	channel := firstNonEmpty(q.Get("channel"), appChannelDefault)
 
 	baseQuery := req.URL.RawQuery
 	var finalQuery string
@@ -441,15 +441,15 @@ func signHongguoAppPlayRequest(req *http.Request, body []byte, now time.Time) {
 
 	req.Header.Set("x-ss-req-ticket", strconv.FormatInt(rticket, 10))
 	req.Header.Set("sdk-version", "2")
-	req.Header.Set("passport-sdk-version", "5051452")
+	req.Header.Set("passport-sdk-version", appPassportSDKVer)
 	req.Header.Set("x-xs-from-web", "0")
 	req.Header.Set("x-khronos", strconv.FormatUint(uint64(stamp), 10))
-	req.Header.Set("x-ladon", hongguoSpeckHeader(aid, "1611921764", stamp, nonce[2:6]))
+	req.Header.Set("x-ladon", hongguoSpeckHeader(aid, appLadonID, stamp, nonce[2:6]))
 	req.Header.Set("x-argus", hongguoAppArgus(finalQuery, body, stamp, aid, deviceID, versionName, deviceType, osVersion, channel, argusNonce))
 	req.Header.Set("x-gorgon", hex.EncodeToString(append([]byte{0x84, 0x04, head0, head1, 0x40, 0x01}, seed...)))
-	req.Header.Set("x-helios", hongguoSpeckHeader(aid, "1588093228", stamp, nonce[11:15]))
-	req.Header.Set("x-vc-bdturing-sdk-version", "4.0.3.cn")
-	req.Header.Set("lc", "101")
+	req.Header.Set("x-helios", hongguoSpeckHeader(aid, appHeliosID, stamp, nonce[11:15]))
+	req.Header.Set("x-vc-bdturing-sdk-version", appBdturingSDKVer)
+	req.Header.Set("lc", appLcID)
 	req.Header.Set("x-ss-dp", aid)
 	req.Header.Set("x-reading-request", fmt.Sprintf("%d-%d", rticket, reqRand))
 	req.Header.Set("x-ss-stub", strings.ToUpper(hex.EncodeToString(md5b[:])))
@@ -506,35 +506,35 @@ func (c *Client) RegisterNewDevice(ctx context.Context) (DeviceProfile, error) {
 			"display_name":            "红果免费短剧",
 			"update_version_code":     73932,
 			"manifest_version_code":   73932,
-			"app_version_minor":       "7.3.9.32",
+			"app_version_minor":       appVersionName,
 			"aid":                     8662,
-			"channel":                 "69310258a",
-			"package":                 "com.phoenix.read",
-			"app_version":             "7.3.9.32",
+			"channel":                 appChannelRegistered,
+			"package":                 appPackage,
+			"app_version":             appVersionName,
 			"version_code":            73932,
-			"sdk_version":             "3.7.0-rc.34-fanqie-xiaoshuo",
-			"sdk_target_version":      29,
+			"sdk_version":             appSDKVersion,
+			"sdk_target_version":      appSDKTgtVersion,
 			"os":                      "Android",
-			"os_version":              "12",
+			"os_version":              appOSVersion,
 			"os_api":                  32,
-			"device_model":            "25053RT47C",
-			"device_brand":            "Redmi",
-			"device_manufacturer":     "Xiaomi",
+			"device_model":            appDeviceType,
+			"device_brand":            appDeviceBrand,
+			"device_manufacturer":     appDeviceManu,
 			"cpu_abi":                 "arm64-v8a",
 			"density_dpi":             520,
 			"display_density":         "mdpi",
 			"resolution":              "2772*1280",
-			"language":                "zh",
+			"language":                appLanguage,
 			"timezone":                8,
 			"access":                  "wifi",
 			"not_request_sender":      0,
 			"carrier":                 "CHINA MOBILE",
 			"mcc_mnc":                 "46000",
 			"rom":                     "1135",
-			"rom_version":             "W528JS release-keys",
-			"git_hash":                "3a88f4e",
-			"sig_hash":                "56a962410c494bbaf0b58dba20cae56f",
-			"release_build":           "b5e187f",
+			"rom_version":             appRomVersion,
+			"git_hash":                appGitHash,
+			"sig_hash":                appSigHash,
+			"release_build":           appReleaseBuild,
 			"cdid":                    cdid,
 			"openudid":                openUDID,
 			"clientudid":              clientUDID,
@@ -545,7 +545,7 @@ func (c *Client) RegisterNewDevice(ctx context.Context) (DeviceProfile, error) {
 			"sim_serial_number":       []any{},
 			"oaid_may_support":        false,
 			"req_id":                  reqID,
-			"device_platform":         "android",
+			"device_platform":         appDevicePlatform,
 			"custom": map[string]any{
 				"account_region_src": "fallback",
 				"host_bit":           64,
@@ -578,7 +578,7 @@ func (c *Client) RegisterNewDevice(ctx context.Context) (DeviceProfile, error) {
 
 	md5Sum := md5.Sum(encBody)
 	stub := strings.ToUpper(hex.EncodeToString(md5Sum[:]))
-	ua := "com.phoenix.read/73932 (Linux; U; Android 12; zh_CN; 25053RT47C; Build/W528JS; Cronet/TTNetVersion:8d40f833 2026-03-03 QuicVersion:21ac1950 2025-11-18)"
+	ua := appUserAgent
 
 	var traceRand [24]byte
 	_, _ = rand.Read(traceRand[:])
@@ -592,7 +592,7 @@ func (c *Client) RegisterNewDevice(ctx context.Context) (DeviceProfile, error) {
 
 	var lastErr error
 	for _, host := range regHosts {
-		regURL := host + "/service/2/device_register/?tt_data=a&cronet_version=8d40f833_2026-03-03&ttnet_version=4.2.243.31-douyin&use_store_region_cookie=1"
+		regURL := host + pathDeviceRegister
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, regURL, bytes.NewReader(encBody))
 		if err != nil {
 			lastErr = err
@@ -650,13 +650,13 @@ func (c *Client) RegisterNewDevice(ctx context.Context) (DeviceProfile, error) {
 			KlinkEgdi:   mapString(res, "klink_egdi"),
 			DeviceToken: mapString(res, "device_token"),
 			TTReq:       ttreq,
-			DeviceBrand: "Redmi",
-			DeviceType:  "25053RT47C",
-			OSVersion:   "12",
-			OSAPI:       "25",
-			Resolution:  "1280*2772",
-			DPI:         "520",
-			Channel:     "69310258a",
+			DeviceBrand: appDeviceBrand,
+			DeviceType:  appDeviceType,
+			OSVersion:   appOSVersion,
+			OSAPI:       appOSAPI,
+			Resolution:  appResolution,
+			DPI:         appDPI,
+			Channel:     appChannelRegistered,
 			UserAgent:   ua,
 		}
 

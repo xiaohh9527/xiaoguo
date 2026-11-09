@@ -23,7 +23,7 @@ import (
 const (
 	AppBaseURL   = "https://api5-normal-sinfonlineb.fqnovel.com"
 	WebBaseURL   = "https://hongguoduanju.com"
-	AppUserAgent = "com.phoenix.read/73932 (Linux; U; Android 7.1.2; zh_CN; Xiaomi 14; Build/N2G47H; Cronet/TTNetVersion:8d40f833 QuicVersion:462f352c 2026-08-31)"
+	AppUserAgent = appUserAgent
 	WebUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
 )
 
@@ -59,14 +59,14 @@ func defaultDeviceProfiles() []DeviceProfile {
 			KlinkEgdi:   "AALJr8OiZ78N5ncFnZGybSZAt52ItCaM990IsL1EdLhL-FeS6K3MmOTh",
 			DeviceToken: "AAAUZ5HHSUIKDRTA27ODDDEPZFMNSYT6W5PZJG4W2YW46L73MQHSVJCMC47WOGQW2NYW2TMKUE4FBDI5EGFRAL3ZQ3BMAMI7VHL7R5PFDOQ4XBEB5ZMWIVHJ4FOJ4",
 			TTReq:       "1$c95a148c5eef4a4c0aad53fde7c02cd3c2514c53",
-			DeviceBrand: "Redmi",
-			DeviceType:  "25053RT47C",
-			OSVersion:   "12",
-			OSAPI:       "25",
-			Resolution:  "1280*2772",
-			DPI:         "520",
-			Channel:     "69310258a",
-			UserAgent:   "com.phoenix.read/73932 (Linux; U; Android 12; zh_CN; 25053RT47C; Build/W528JS; Cronet/TTNetVersion:8d40f833 2026-03-03 QuicVersion:21ac1950 2025-11-18)",
+			DeviceBrand: appDeviceBrand,
+			DeviceType:  appDeviceType,
+			OSVersion:   appOSVersion,
+			OSAPI:       appOSAPI,
+			Resolution:  appResolution,
+			DPI:         appDPI,
+			Channel:     appChannelRegistered,
+			UserAgent:   appUserAgent,
 		},
 		{
 			DeviceID:    "1255017861116115",
@@ -158,16 +158,16 @@ func loadDeviceProfiles() []DeviceProfile {
 			var loaded DeviceProfile
 			if err := json.Unmarshal(data, &loaded); err == nil && loaded.DeviceID != "" {
 				if loaded.OSAPI == "" {
-					loaded.OSAPI = "25"
+					loaded.OSAPI = appOSAPI
 				}
 				if loaded.Resolution == "" {
-					loaded.Resolution = "1200*2670"
+					loaded.Resolution = appResolution
 				}
 				if loaded.DPI == "" {
-					loaded.DPI = "460"
+					loaded.DPI = appDPI
 				}
 				if loaded.Channel == "" {
-					loaded.Channel = "xiaomi_8662_64"
+					loaded.Channel = appChannelDefault
 				}
 				if !seen[loaded.DeviceID] {
 					seen[loaded.DeviceID] = true
@@ -221,6 +221,7 @@ type Client struct {
 	httpClient     *http.Client
 	deviceProfiles []DeviceProfile
 	deviceIndex    int
+	breakers       map[string]breakerState
 	details        map[string]detailCacheEntry
 	searches       map[string]SearchEntry
 	suggestions    map[string]suggestionCacheEntry
@@ -235,7 +236,16 @@ func (c *Client) CurrentDevice() DeviceProfile {
 	if len(c.deviceProfiles) == 0 {
 		return defaultDeviceProfiles()[0]
 	}
-	return c.deviceProfiles[c.deviceIndex%len(c.deviceProfiles)]
+	// 优先返回健康分最高的设备，降权中的排在后面。
+	bestIdx := c.deviceIndex % len(c.deviceProfiles)
+	bestScore := deviceScore(c.deviceProfiles[bestIdx].DeviceID)
+	for i, d := range c.deviceProfiles {
+		if s := deviceScore(d.DeviceID); s > bestScore {
+			bestScore, bestIdx = s, i
+		}
+	}
+	c.deviceIndex = bestIdx
+	return c.deviceProfiles[bestIdx]
 }
 
 func (c *Client) RotateDevice() DeviceProfile {
@@ -247,8 +257,24 @@ func (c *Client) RotateDevice() DeviceProfile {
 		}
 		return c.deviceProfiles[0]
 	}
-	c.deviceIndex = (c.deviceIndex + 1) % len(c.deviceProfiles)
-	return c.deviceProfiles[c.deviceIndex]
+	// 从剩余候选中选健康分最高的作为轮换结果，避免把坑设备再推到前台。
+	cur := c.deviceIndex % len(c.deviceProfiles)
+	bestIdx, bestScore := cur, deviceScore(c.deviceProfiles[cur].DeviceID)
+	for i, d := range c.deviceProfiles {
+		if i == cur {
+			continue
+		}
+		if s := deviceScore(d.DeviceID); s > bestScore {
+			bestScore, bestIdx = s, i
+		}
+	}
+	if bestIdx == cur {
+		// 全部同分或只有当前设备健康：退化为顺序轮换，保证不原地死磕。
+		c.deviceIndex = (cur + 1) % len(c.deviceProfiles)
+		return c.deviceProfiles[c.deviceIndex]
+	}
+	c.deviceIndex = bestIdx
+	return c.deviceProfiles[bestIdx]
 }
 
 func (c *Client) DevicePool() []DeviceProfile {
@@ -296,41 +322,42 @@ func NewClient() *Client {
 
 	jar, _ := cookiejar.New(nil)
 
-	return &Client{
-		httpClient: &http.Client{
-			Transport: transport,
-			Jar:       jar,
-			Timeout:   35 * time.Second,
-		},
-		deviceProfiles: loadDeviceProfiles(),
-		details:        make(map[string]detailCacheEntry),
-		searches:       make(map[string]SearchEntry),
-		suggestions:    make(map[string]suggestionCacheEntry),
-		danmaku:        make(map[string]danmakuCacheEntry),
-		playbacks:      make(map[string]playbackCacheEntry),
-		playbackJobs:   make(map[string]*playbackJob),
-	}
+		return &Client{
+			httpClient: &http.Client{
+				Transport: transport,
+				Jar:       jar,
+				Timeout:   35 * time.Second,
+			},
+			deviceProfiles: loadDeviceProfiles(),
+			breakers:       make(map[string]breakerState),
+			details:        make(map[string]detailCacheEntry),
+			searches:       make(map[string]SearchEntry),
+			suggestions:    make(map[string]suggestionCacheEntry),
+			danmaku:        make(map[string]danmakuCacheEntry),
+			playbacks:      make(map[string]playbackCacheEntry),
+			playbackJobs:   make(map[string]*playbackJob),
+		}
 }
 
 func (c *Client) AppRequest(ctx context.Context, method, path string, extra url.Values, payload any, isComment bool) (map[string]any, error) {
 	dev := c.CurrentDevice()
 
 	query := url.Values{
-		"aid":                   {"8662"},
-		"app_name":              {"novelread"},
-		"version_code":          {"73932"},
-		"version_name":          {"7.3.9.32"},
-		"manifest_version_code": {"73932"},
-		"update_version_code":   {"73932"},
+		"aid":                   {appAid},
+		"app_name":              {appName},
+		"version_code":          {appVersionCode},
+		"version_name":          {appVersionName},
+		"manifest_version_code": {appManifestVerCode},
+		"update_version_code":   {appUpdateVerCode},
 		"channel":               {dev.Channel},
-		"device_platform":       {"android"},
-		"os":                    {"android"},
-		"ssmix":                 {"a"},
+		"device_platform":       {appDevicePlatform},
+		"os":                    {appOS},
+		"ssmix":                 {appSSMix},
 		"device_type":           {dev.DeviceType},
 		"device_brand":          {dev.DeviceBrand},
-		"language":              {"zh"},
-		"os_api":                {"25"},
-		"os_version":            {"7.1.2"},
+		"language":              {appLanguage},
+		"os_api":                {appOSAPI},
+		"os_version":            {dev.OSVersion},
 		"resolution":            {dev.Resolution},
 		"dpi":                   {dev.DPI},
 		"ac":                    {"wifi"},

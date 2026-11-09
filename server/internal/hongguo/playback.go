@@ -95,24 +95,47 @@ func (c *Client) ResolvePlayback(ctx context.Context, seriesID, videoID string) 
 
 func (c *Client) doResolvePlayback(ctx context.Context, seriesID, videoID string) (PlaybackInfo, error) {
 	// 1. Try App video model first (provides full 1080P/720P/540P/480P ladder with CENC decryption, maximum native quality)
+	playbackErrMarked := false
+	_ = playbackErrMarked
 	info, appErr := c.resolveAppMedia(ctx, seriesID, videoID)
 	if appErr == nil && len(info.Variants) > 0 {
+		c.recordSuccess(srcApp)
 		return info, nil
+	}
+	if isBreakableErr(appErr) {
+		c.recordFailure(srcApp)
+	} else if appErr != nil {
+		// 非拦截类错误也记一次失败，但不计入相同熔断逻辑直接降权？这里先记录健康，
+		// 让设备健康度感知到问题。
+		_ = appErr
 	}
 
 	// 2. Try Web media fallback (router page or 360p fallback-play-info if App request fails)
-	info, webErr := c.resolveWebMedia(ctx, seriesID, videoID)
-	if webErr == nil && len(info.Variants) > 0 {
-		return info, nil
+	// 熔断冷却中则跳过，避免发注定失败的请求拖慢首播。
+	if allowed, _ := c.allow(srcWeb); allowed {
+		info, webErr := c.resolveWebMedia(ctx, seriesID, videoID)
+		if webErr == nil && len(info.Variants) > 0 {
+			c.recordSuccess(srcWeb)
+			return info, nil
+		}
+		if isBreakableErr(webErr) {
+			c.recordFailure(srcWeb)
+		}
 	}
 
 	// 3. Try Backup API
-	info, apiErr := c.resolveBackupMedia(ctx, seriesID, videoID)
-	if apiErr == nil && len(info.Variants) > 0 {
-		return info, nil
+	if allowed, _ := c.allow(srcBackup); allowed {
+		info, apiErr := c.resolveBackupMedia(ctx, seriesID, videoID)
+		if apiErr == nil && len(info.Variants) > 0 {
+			c.recordSuccess(srcBackup)
+			return info, nil
+		}
+		if isBreakableErr(apiErr) {
+			c.recordFailure(srcBackup)
+		}
 	}
 
-	return PlaybackInfo{}, fmt.Errorf("解析播放地址失败: app=%v, web=%v, backup=%w", appErr, webErr, apiErr)
+	return PlaybackInfo{}, fmt.Errorf("解析播放地址失败: app=%v, web=%v, backup=%w", appErr, breakerError(srcWeb), ErrBreakerOpen)
 }
 
 func parseVideoModelMap(result map[string]any, videoID string) map[string]any {
@@ -175,23 +198,41 @@ func parseRawVariants(model map[string]any) []map[string]any {
 }
 
 func (c *Client) resolveAppMedia(ctx context.Context, seriesID, videoID string) (PlaybackInfo, error) {
+	// 熔断检查：连续空包/403 后进入冷却，直接跳过主链避免重复撞墙。
+	if allowed, _ := c.allow(srcApp); !allowed {
+		return PlaybackInfo{}, breakerError(srcApp)
+	}
 	// 1. Primary: POST /novel/player/multi_video_model/player/v1 with full Argus/Ladon/Helios/Gorgon signature and gzip body
 	infoLegacy, errLegacy := c.resolveLegacyMultiVideoModel(ctx, seriesID, videoID)
 	if errLegacy == nil && len(infoLegacy.Variants) > 0 {
+		c.recordSuccess(srcApp)
 		return infoLegacy, nil
+	}
+	if errLegacy != nil {
+		recordDeviceFailure(c.CurrentDevice().DeviceID, errLegacy.Error())
+		if isBreakableErr(errLegacy) {
+			c.recordFailure(srcApp)
+		}
 	}
 
 	// 2. If primary failed (e.g. device identity expired), auto-register a fresh device and retry immediately
 	if _, regErr := c.RegisterNewDevice(ctx); regErr == nil {
 		if infoRetry, errRetry := c.resolveLegacyMultiVideoModel(ctx, seriesID, videoID); errRetry == nil && len(infoRetry.Variants) > 0 {
+			c.recordSuccess(srcApp)
 			return infoRetry, nil
+		} else if errRetry != nil {
+			recordDeviceFailure(c.CurrentDevice().DeviceID, errRetry.Error())
 		}
 	}
 
 	// 3. Fallback: GET /reading/bookapi/video_tab/multi_video_model/v1/
 	info, err := c.resolveVideoTabModel(ctx, seriesID, videoID)
 	if err == nil && len(info.Variants) > 0 {
+		c.recordSuccess(srcVideoTab)
 		return info, nil
+	}
+	if err != nil && isBreakableErr(err) {
+		c.recordFailure(srcVideoTab)
 	}
 
 	if errLegacy != nil {
@@ -205,29 +246,28 @@ func (c *Client) resolveVideoTabModel(ctx context.Context, seriesID, videoID str
 	now := time.Now()
 	nowMs := strconv.FormatInt(now.UnixMilli(), 10)
 
-	aids := []string{"1967", "8662"}
 	var lastErr error
 
-	for _, aid := range aids {
+	for _, aid := range []string{"1967", appAid} {
 		query := url.Values{
 			"video_id":                  {videoID},
 			"video_platform":            {"1024"},
 			"need_all_video_definition": {"true"},
 			"aid":                       {aid},
-			"app_name":                  {"novelread"},
-			"version_code":              {"73932"},
-			"version_name":              {"7.3.9.32"},
-			"manifest_version_code":     {"73932"},
-			"update_version_code":       {"73932"},
+			"app_name":                  {appName},
+			"version_code":              {appVersionCode},
+			"version_name":              {appVersionName},
+			"manifest_version_code":     {appManifestVerCode},
+			"update_version_code":       {appUpdateVerCode},
 			"channel":                   {dev.Channel},
-			"device_platform":           {"android"},
-			"os":                        {"android"},
-			"ssmix":                     {"a"},
+			"device_platform":           {appDevicePlatform},
+			"os":                        {appOS},
+			"ssmix":                     {appSSMix},
 			"device_type":               {dev.DeviceType},
 			"device_brand":              {dev.DeviceBrand},
-			"language":                  {"zh"},
-			"os_api":                    {"25"},
-			"os_version":                {"7.1.2"},
+			"language":                  {appLanguage},
+			"os_api":                    {appOSAPI},
+			"os_version":                {dev.OSVersion},
 			"resolution":                {dev.Resolution},
 			"dpi":                       {dev.DPI},
 			"ac":                        {"wifi"},
@@ -504,32 +544,32 @@ func (c *Client) resolveLegacyMultiVideoModel(ctx context.Context, seriesID, vid
 						"device_id":               {dev.DeviceID},
 						"ac":                      {"wifi"},
 						"channel":                 {dev.Channel},
-						"aid":                     {"8662"},
-						"app_name":                {"novelread"},
-						"version_code":            {"73932"},
-						"version_name":            {"7.3.9.32"},
-						"device_platform":         {"android"},
-						"os":                      {"android"},
-						"ssmix":                   {"a"},
+						"aid":                     {appAid},
+						"app_name":                {appName},
+						"version_code":            {appVersionCode},
+						"version_name":            {appVersionName},
+						"device_platform":         {appDevicePlatform},
+						"os":                      {appOS},
+						"ssmix":                   {appSSMix},
 						"device_type":             {dev.DeviceType},
 						"device_brand":            {dev.DeviceBrand},
-						"language":                {"zh"},
-						"os_api":                  {"25"},
+						"language":                {appLanguage},
+						"os_api":                  {appOSAPI},
 						"os_version":              {osVer},
 						"openudid":                {dev.OpenUDID},
-						"manifest_version_code":   {"73932"},
+						"manifest_version_code":   {appManifestVerCode},
 						"resolution":              {dev.Resolution},
 						"dpi":                     {dev.DPI},
-						"update_version_code":     {"73932"},
+						"update_version_code":     {appUpdateVerCode},
 						"cdid":                    {dev.CDID},
 						"host_abi":                {"arm64-v8a"},
 						"dragon_device_type":      {"phone"},
-						"pv_player":               {"73932"},
+						"pv_player":               {appVersionCode},
 						"compliance_status":       {"0"},
 						"need_personal_recommend": {"1"},
 						"player_so_load":          {"1"},
 						"is_android_pad_screen":   {"0"},
-						"rom_version":             {"W528JS release-keys"},
+						"rom_version":             {appRomVersion},
 					}
 					if dev.KlinkEgdi != "" {
 						query.Set("klink_egdi", dev.KlinkEgdi)
