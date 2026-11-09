@@ -36,6 +36,7 @@ type DeviceProfile struct {
 	IID         string `json:"iid,omitempty"`
 	CDID        string `json:"cdid"`
 	OpenUDID    string `json:"openudid"`
+	KlinkEgdi   string `json:"klink_egdi,omitempty"`
 	DeviceToken string `json:"device_token,omitempty"`
 	TTReq       string `json:"ttreq,omitempty"`
 	DeviceBrand string `json:"device_brand"`
@@ -50,6 +51,23 @@ type DeviceProfile struct {
 
 func defaultDeviceProfiles() []DeviceProfile {
 	return []DeviceProfile{
+		{
+			DeviceID:    "1342980729399856",
+			InstallID:   "1342980729403952",
+			CDID:        "a8f4c210-7b1e-4d89-9c3d-1e5a8b7c9d02",
+			OpenUDID:    "9774d56d682e549c",
+			KlinkEgdi:   "AALJr8OiZ78N5ncFnZGybSZAt52ItCaM990IsL1EdLhL-FeS6K3MmOTh",
+			DeviceToken: "AAAUZ5HHSUIKDRTA27ODDDEPZFMNSYT6W5PZJG4W2YW46L73MQHSVJCMC47WOGQW2NYW2TMKUE4FBDI5EGFRAL3ZQ3BMAMI7VHL7R5PFDOQ4XBEB5ZMWIVHJ4FOJ4",
+			TTReq:       "1$c95a148c5eef4a4c0aad53fde7c02cd3c2514c53",
+			DeviceBrand: "Redmi",
+			DeviceType:  "25053RT47C",
+			OSVersion:   "12",
+			OSAPI:       "25",
+			Resolution:  "1280*2772",
+			DPI:         "520",
+			Channel:     "69310258a",
+			UserAgent:   "com.phoenix.read/73932 (Linux; U; Android 12; zh_CN; 25053RT47C; Build/W528JS; Cronet/TTNetVersion:8d40f833 2026-03-03 QuicVersion:21ac1950 2025-11-18)",
+		},
 		{
 			DeviceID:    "1255017861116115",
 			InstallID:   "1255017860317411",
@@ -370,16 +388,14 @@ func (c *Client) AppRequest(ctx context.Context, method, path string, extra url.
 			req.Header.Set("Comment-Source", "601")
 			req.Header.Set("Server-Channel", "1000")
 			signHongguoCommentRequest(req, nonce, now)
-			} else if strings.Contains(path, "video_detail") {
-				nonce, nonceErr := newHongguoCommentNonce()
-				if nonceErr == nil {
-					req.Header.Set("Comment-Source", "601")
-					req.Header.Set("Server-Channel", "1000")
-					signHongguoCommentRequest(req, nonce, now)
-				}
-			} else if attempt == 0 {
-				signHongguoRequest(req, body, now)
+		} else {
+			signHongguoAppPlayRequest(req, body, now)
+			cookie := fmt.Sprintf("install_id=%s; store-region=cn-hk; store-region-src=did", dev.InstallID)
+			if dev.TTReq != "" {
+				cookie += "; ttreq=" + dev.TTReq
 			}
+			req.Header.Set("Cookie", cookie)
+		}
 
 			if payload != nil {
 				req.Header.Set("Content-Type", "application/json; charset=utf-8")

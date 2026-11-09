@@ -6,15 +6,12 @@ import (
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/md5"
-	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"math/big"
 	"math/bits"
 	"net/http"
 	"net/url"
@@ -178,22 +175,29 @@ func parseRawVariants(model map[string]any) []map[string]any {
 }
 
 func (c *Client) resolveAppMedia(ctx context.Context, seriesID, videoID string) (PlaybackInfo, error) {
-	// 1. Primary: GET /reading/bookapi/video_tab/multi_video_model/v1/ (high reliability, true 1080P/720P/540P/480P/360P quality ladder)
-	info, err := c.resolveVideoTabModel(ctx, seriesID, videoID)
-	if err == nil && len(info.Variants) > 0 {
-		return info, nil
-	}
-
-	// 2. Fallback: POST /novel/player/multi_video_model/v1/
+	// 1. Primary: POST /novel/player/multi_video_model/player/v1 with full Argus/Ladon/Helios/Gorgon signature and gzip body
 	infoLegacy, errLegacy := c.resolveLegacyMultiVideoModel(ctx, seriesID, videoID)
 	if errLegacy == nil && len(infoLegacy.Variants) > 0 {
 		return infoLegacy, nil
 	}
 
-	if err != nil {
-		return PlaybackInfo{}, err
+	// 2. If primary failed (e.g. device identity expired), auto-register a fresh device and retry immediately
+	if _, regErr := c.RegisterNewDevice(ctx); regErr == nil {
+		if infoRetry, errRetry := c.resolveLegacyMultiVideoModel(ctx, seriesID, videoID); errRetry == nil && len(infoRetry.Variants) > 0 {
+			return infoRetry, nil
+		}
 	}
-	return PlaybackInfo{}, errLegacy
+
+	// 3. Fallback: GET /reading/bookapi/video_tab/multi_video_model/v1/
+	info, err := c.resolveVideoTabModel(ctx, seriesID, videoID)
+	if err == nil && len(info.Variants) > 0 {
+		return info, nil
+	}
+
+	if errLegacy != nil {
+		return PlaybackInfo{}, errLegacy
+	}
+	return PlaybackInfo{}, err
 }
 
 func (c *Client) resolveVideoTabModel(ctx context.Context, seriesID, videoID string) (PlaybackInfo, error) {
@@ -440,20 +444,23 @@ func (c *Client) resolveLegacyMultiVideoModel(ctx context.Context, seriesID, vid
 		"detail_page_version":       0,
 		"device_level":              4,
 		"disable_digg_stat":         false,
+		"disable_video_relate_book": false,
 		"need_all_video_definition": true,
 		"need_mp4_align":            false,
 		"use_os_player":             false,
-		"use_server_dns":            false,
+		"use_server_dns":            true,
+		"use_server_dns_scene":      "cold_start_stage",
 		"video_platform":            1024,
 	}
 
 	contentTypes := []string{"1004", "1", "1001"}
+	paths := []string{"/novel/player/multi_video_model/player/v1", "/novel/player/multi_video_model/v1/"}
 	var lastErr error
 
 	for di, dev := range devs {
 		if di > 0 {
 			select {
-			case <-time.After(300 * time.Millisecond):
+			case <-time.After(200 * time.Millisecond):
 			case <-ctx.Done():
 				return PlaybackInfo{}, ctx.Err()
 			}
@@ -461,144 +468,148 @@ func (c *Client) resolveLegacyMultiVideoModel(ctx context.Context, seriesID, vid
 		for _, ct := range contentTypes {
 			payload := map[string]any{
 				"biz_param": bizParam,
+				"dr_scene":  "player",
 				"mixed_video_id_map": map[string]any{
 					ct: []string{videoID},
 				},
 			}
-			body, err := json.Marshal(payload)
+			rawBody, err := json.Marshal(payload)
 			if err != nil {
 				return PlaybackInfo{}, err
 			}
 
-			h := md5.Sum(body)
-			stub := strings.ToUpper(hex.EncodeToString(h[:]))
+			var gzBuf bytes.Buffer
+			gzWriter := gzip.NewWriter(&gzBuf)
+			_, _ = gzWriter.Write(rawBody)
+			_ = gzWriter.Close()
+			gzBody := gzBuf.Bytes()
 
-			for hi, baseURL := range playHosts {
-				if hi > 0 {
-					select {
-					case <-time.After(200 * time.Millisecond):
-					case <-ctx.Done():
-						return PlaybackInfo{}, ctx.Err()
+			for _, path := range paths {
+				for hi, baseURL := range playHosts {
+					if hi > 0 {
+						select {
+						case <-time.After(150 * time.Millisecond):
+						case <-ctx.Done():
+							return PlaybackInfo{}, ctx.Err()
+						}
 					}
-				}
-				now := time.Now()
-				rnd, _ := rand.Int(rand.Reader, big.NewInt(0x35a4e900))
-				reqID := fmt.Sprintf("%d-%d", now.UnixMilli(), rnd.Int64()+0x5f5e100)
+					now := time.Now()
+					osVer := dev.OSVersion
+					if osVer == "" {
+						osVer = "12"
+					}
 
-				query := url.Values{
-					"aid":                       {"8662"},
-					"app_name":                  {"novelread"},
-					"version_code":              {"73932"},
-					"version_name":              {"7.3.9.32"},
-					"manifest_version_code":     {"73932"},
-					"update_version_code":       {"73932"},
-					"channel":                   {dev.Channel},
-					"device_platform":           {"android"},
-					"os":                        {"android"},
-					"ssmix":                     {"a"},
-					"device_type":               {dev.DeviceType},
-					"device_brand":              {dev.DeviceBrand},
-					"language":                  {"zh"},
-					"os_api":                    {"25"},
-					"os_version":                {"7.1.2"},
-					"resolution":                {dev.Resolution},
-					"dpi":                       {dev.DPI},
-					"ac":                        {"wifi"},
-					"host_abi":                  {"arm64-v8a"},
-					"dragon_device_type":        {"phone"},
-					"compliance_status":         {"0"},
-					"need_personal_recommend":   {"1"},
-					"player_so_load":            {"1"},
-					"is_android_pad_screen":     {"0"},
-					"pv_player":                 {"1"},
-					"passport-sdk-version":      {"50514"},
-					"use_new_token_expire_rule": {"1"},
-					"cronet_version":            {"8d40f833_2026-03-03"},
-					"ttnet_version":             {"4.2.243.31-douyin"},
-					"use_store_region_cookie":   {"1"},
-					"device_id":                 {dev.DeviceID},
-					"iid":                       {dev.InstallID},
-					"cdid":                      {dev.CDID},
-					"openudid":                  {dev.OpenUDID},
-					"_rticket":                  {strconv.FormatInt(now.UnixMilli(), 10)},
-				}
+					query := url.Values{
+						"iid":                     {dev.InstallID},
+						"device_id":               {dev.DeviceID},
+						"ac":                      {"wifi"},
+						"channel":                 {dev.Channel},
+						"aid":                     {"8662"},
+						"app_name":                {"novelread"},
+						"version_code":            {"73932"},
+						"version_name":            {"7.3.9.32"},
+						"device_platform":         {"android"},
+						"os":                      {"android"},
+						"ssmix":                   {"a"},
+						"device_type":             {dev.DeviceType},
+						"device_brand":            {dev.DeviceBrand},
+						"language":                {"zh"},
+						"os_api":                  {"25"},
+						"os_version":              {osVer},
+						"openudid":                {dev.OpenUDID},
+						"manifest_version_code":   {"73932"},
+						"resolution":              {dev.Resolution},
+						"dpi":                     {dev.DPI},
+						"update_version_code":     {"73932"},
+						"cdid":                    {dev.CDID},
+						"host_abi":                {"arm64-v8a"},
+						"dragon_device_type":      {"phone"},
+						"pv_player":               {"73932"},
+						"compliance_status":       {"0"},
+						"need_personal_recommend": {"1"},
+						"player_so_load":          {"1"},
+						"is_android_pad_screen":   {"0"},
+						"rom_version":             {"W528JS release-keys"},
+					}
+					if dev.KlinkEgdi != "" {
+						query.Set("klink_egdi", dev.KlinkEgdi)
+					}
 
-				fullURL := fmt.Sprintf("%s/novel/player/multi_video_model/v1/?%s", baseURL, query.Encode())
-				req, err := http.NewRequestWithContext(ctx, http.MethodPost, fullURL, bytes.NewReader(body))
-				if err != nil {
-					lastErr = err
-					continue
-				}
+					fullURL := fmt.Sprintf("%s%s?%s", baseURL, path, query.Encode())
+					req, err := http.NewRequestWithContext(ctx, http.MethodPost, fullURL, bytes.NewReader(gzBody))
+					if err != nil {
+						lastErr = err
+						continue
+					}
 
-				ua := dev.UserAgent
-				if ua == "" {
-					ua = AppUserAgent
-				}
-				req.Header.Set("User-Agent", ua)
-				req.Header.Set("Accept", "application/json; charset=utf-8,application/x-protobuf")
-				req.Header.Set("Content-Type", "application/json; charset=utf-8")
-				req.Header.Set("X-XS-From-Web", "0")
-				req.Header.Set("X-VC-Bdturing-Sdk-Version", "4.0.3.cn")
-				req.Header.Set("Sdk-Version", "2")
-				req.Header.Set("Passport-Sdk-Version", "50514")
-				req.Header.Set("X-TT-Store-Region", "cn-gd")
-				req.Header.Set("X-TT-Store-Region-Src", "did")
-				req.Header.Set("X-SS-DP", "8662")
-				req.Header.Set("X-Reading-Request-Id", reqID)
-				req.Header.Set("X-SS-Req-Ticket", strconv.FormatInt(now.UnixMilli(), 10))
-				req.Header.Set("X-SS-STUB", stub)
-				if dev.DeviceToken != "" {
-					req.Header.Set("X-Tt-Token", dev.DeviceToken)
-				}
-				cookie := fmt.Sprintf("install_id=%s; store-region=cn-hk; store-region-src=did", dev.InstallID)
-				if dev.TTReq != "" {
-					cookie += "; ttreq=" + dev.TTReq
-				}
-				req.Header.Set("Cookie", cookie)
+					ua := dev.UserAgent
+					if ua == "" {
+						ua = AppUserAgent
+					}
+					req.Header.Set("User-Agent", ua)
+					req.Header.Set("Accept", "application/json; charset=utf-8,application/x-protobuf")
+					req.Header.Set("Content-Type", "application/json; charset=UTF-8")
+					req.Header.Set("Content-Encoding", "gzip")
+					signHongguoAppPlayRequest(req, gzBody, now)
 
-				resp, err := c.httpClient.Do(req)
-				if err != nil {
-					lastErr = err
-					continue
-				}
+					cookie := fmt.Sprintf("install_id=%s; store-region=cn-hk; store-region-src=did", dev.InstallID)
+					if dev.TTReq != "" {
+						cookie += "; ttreq=" + dev.TTReq
+					}
+					req.Header.Set("Cookie", cookie)
 
-				respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
-				resp.Body.Close()
-				if readErr != nil {
-					lastErr = readErr
-					continue
-				}
+					resp, err := c.httpClient.Do(req)
+					if err != nil {
+						lastErr = err
+						continue
+					}
 
-				if resp.StatusCode != http.StatusOK || len(respBody) == 0 {
-					lastErr = fmt.Errorf("HTTP %d, len %d", resp.StatusCode, len(respBody))
-					continue
-				}
+					var reader io.Reader = resp.Body
+					if resp.Header.Get("Content-Encoding") == "gzip" {
+						if gz, gzErr := gzip.NewReader(resp.Body); gzErr == nil {
+							defer gz.Close()
+							reader = gz
+						}
+					}
 
-				var result struct {
-					Code int `json:"code"`
-					Data map[string]struct {
-						VideoModel string `json:"video_model"`
-					} `json:"data"`
-				}
-				dec := json.NewDecoder(bytes.NewReader(respBody))
-				dec.UseNumber()
-				if err := dec.Decode(&result); err != nil {
-					lastErr = err
-					continue
-				}
+					respBody, readErr := io.ReadAll(io.LimitReader(reader, 10<<20))
+					resp.Body.Close()
+					if readErr != nil {
+						lastErr = readErr
+						continue
+					}
 
-				item, ok := result.Data[videoID]
-				if !ok || item.VideoModel == "" {
-					lastErr = fmt.Errorf("未找到分集 %s 播放模型", videoID)
-					continue
-				}
+					if resp.StatusCode != http.StatusOK || len(respBody) == 0 {
+						lastErr = fmt.Errorf("HTTP %d, len %d", resp.StatusCode, len(respBody))
+						continue
+					}
 
-				info, parseErr := parseVideoModelJSON(item.VideoModel, seriesID, videoID)
-				if parseErr == nil && len(info.Variants) > 0 {
-					return info, nil
-				}
-				if parseErr != nil {
-					lastErr = parseErr
+					var result struct {
+						Code int `json:"code"`
+						Data map[string]struct {
+							VideoModel string `json:"video_model"`
+						} `json:"data"`
+					}
+					dec := json.NewDecoder(bytes.NewReader(respBody))
+					dec.UseNumber()
+					if err := dec.Decode(&result); err != nil {
+						lastErr = err
+						continue
+					}
+
+					item, ok := result.Data[videoID]
+					if !ok || item.VideoModel == "" {
+						lastErr = fmt.Errorf("未找到分集 %s 播放模型", videoID)
+						continue
+					}
+
+					info, parseErr := parseVideoModelJSON(item.VideoModel, seriesID, videoID)
+					if parseErr == nil && len(info.Variants) > 0 {
+						return info, nil
+					}
+					if parseErr != nil {
+						lastErr = parseErr
+					}
 				}
 			}
 		}
